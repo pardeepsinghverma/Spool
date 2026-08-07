@@ -1,0 +1,7 @@
+{
+  "name": "ytdlp",
+  "version": "0.1.0",
+  "description": "yt-dlp engine bridge",
+  "main": "index.ts",
+  "private": true
+}

@@ -17,6 +17,15 @@ expo-env.d.ts
 *.p12
 *.key
 *.mobileprovision
+*.keystore
+
+# Gradle build output — the expo module under modules/ builds in place, so this
+# has to match at any depth, not just the repo root.
+build/
+.gradle/
+local.properties
+*.apk
+*.aab
 
 # Metro
 .metro-health-check*
@@ -31,7 +40,11 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
+
+# internal planning doc — not published
+start.md
 
 # typescript
 *.tsbuildinfo

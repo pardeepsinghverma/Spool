@@ -1,0 +1,65 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+apply plugin: 'maven-publish'
+
+group = 'com.mdroppy.downloader.ytdlp'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(
+  project(':expo-modules-core').projectDir.absolutePath,
+  'ExpoModulesCorePlugin.gradle',
+)
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+
+android {
+  namespace 'com.mdroppy.downloader.ytdlp'
+  compileSdk 36
+
+  defaultConfig {
+    minSdk 24
+    targetSdk 36
+    // youtubedl-android ships a Python runtime per ABI. Limiting the set keeps
+    // the APK from carrying four copies of it.
+    ndk {
+      abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
+    }
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  kotlinOptions {
+    jvmTarget = '17'
+  }
+
+  packagingOptions {
+    // The bundled Python payload is a zip that must stay uncompressed so it can
+    // be extracted at runtime.
+    jniLibs {
+      useLegacyPackaging true
+    }
+    resources {
+      excludes += ['META-INF/*', '**/libjsc*.so']
+    }
+  }
+}
+
+repositories {
+  mavenCentral()
+  google()
+}
+
+dependencies {
+  implementation project(':expo-modules-core')
+  implementation "org.jetbrains.kotlin:kotlin-stdlib:${project.findProperty('kotlinVersion') ?: '2.0.21'}"
+
+  // yt-dlp + Python 3.8, the same foundation Seal and YTDLnis ship on.
+  implementation 'io.github.junkfood02.youtubedl-android:library:0.18.1'
+  implementation 'io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1'
+
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+  implementation 'androidx.core:core-ktx:1.13.1'
+}
