@@ -75,6 +75,7 @@ class YtDlpModule : Module() {
             addOption("--no-warnings")
             addOption("--no-playlist")
             applyExtractorArgs(poToken, visitorData)
+            applyBrowserSession()
           }
           val response = YoutubeDL.getInstance().execute(request)
           promise.resolve(response.out)
@@ -123,6 +124,7 @@ class YtDlpModule : Module() {
               addOption("--merge-output-format", "mp4")
             }
             applyExtractorArgs(poToken, visitorData)
+            applyBrowserSession()
           }
 
           val before = outputDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
@@ -245,7 +247,9 @@ class YtDlpModule : Module() {
       parts += "player_client=web"
       parts += "po_token=web.gvs+$poToken"
     }
-    if (!visitorData.isNullOrBlank()) {
+    // visitor_data on its own is worse than nothing: it pins requests to a
+    // session we have no attestation for. Only send it alongside a token.
+    if (!poToken.isNullOrBlank() && !visitorData.isNullOrBlank()) {
       parts += "visitor_data=$visitorData"
     }
     if (parts.isEmpty()) return
@@ -254,6 +258,15 @@ class YtDlpModule : Module() {
     // same extractor, so passing these as separate options silently drops all
     // but the last one.
     addOption("--extractor-args", "youtube:" + parts.joinToString(";"))
+  }
+
+  /**
+   * Hands the in-app browser's YouTube session to yt-dlp. Being a real browser
+   * is the whole advantage; this is where it gets spent.
+   */
+  private fun YoutubeDLRequest.applyBrowserSession() {
+    val cookies = runCatching { CookieJar.write(context) }.getOrNull() ?: return
+    addOption("--cookies", cookies)
   }
 
   private fun startService(id: String, title: String) {
