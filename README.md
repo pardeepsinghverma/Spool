@@ -6,6 +6,28 @@ No ads. No account. No tracking. No floating bubble. The app lives in a bar at t
 
 > **Android only.** Spool is not on the Play Store and never will be — see [Distribution](#distribution).
 
+## Download
+
+**[⬇ Get the latest APK](https://github.com/pardeepsinghverma/Spool/releases/latest)**
+
+Android 7.0 (API 24) or newer. You'll need to allow installs from unknown sources — Android prompts for this the first time.
+
+Releases ship one APK per CPU architecture:
+
+| File | For |
+| --- | --- |
+| `spool-<version>-arm64-v8a.apk` | **Almost certainly this one** — every phone since ~2016 |
+| `spool-<version>-armeabi-v7a.apk` | Older 32-bit devices |
+| `spool-<version>-x86_64.apk` | Emulators, ChromeOS |
+
+Splitting by architecture is not cosmetic here: yt-dlp ships a Python runtime and an ffmpeg build *per ABI*, so a universal APK carries four copies of each and lands at ~226 MB. Per-ABI builds are roughly a third of that.
+
+Verify before installing:
+
+```bash
+sha256sum -c SHA256SUMS.txt --ignore-missing
+```
+
 ---
 
 ## Contents
@@ -19,6 +41,7 @@ No ads. No account. No tracking. No floating bubble. The app lives in a bar at t
 - [Privacy](#privacy)
 - [Project layout](#project-layout)
 - [Build and run](#build-and-run)
+- [Cutting a release](#cutting-a-release)
 - [Troubleshooting](#troubleshooting)
 - [Known limitations](#known-limitations)
 - [Distribution](#distribution)
@@ -207,6 +230,11 @@ Two things worth stating plainly:
 ```
 ├── App.tsx                      Root: SafeArea + Theme providers
 ├── index.ts                     Expo entry point
+├── plugins/
+│   ├── withReleaseSigning.js    Injects release signing into generated Gradle
+│   └── withAbiSplits.js         One APK per architecture instead of a 226 MB one
+├── .github/workflows/
+│   └── release.yml              Tag → signed APK → GitHub Release
 ├── src/
 │   ├── browser/
 │   │   ├── BrowserScreen.tsx    Orchestrator: WebView, download flow, routing
@@ -260,7 +288,7 @@ npm run typecheck
 ### Build configuration
 
 - `minSdk 24`, `targetSdk 36`, `compileSdk 36`, Kotlin JVM target 17.
-- Native ABIs are limited to `arm64-v8a`, `armeabi-v7a`, `x86_64`. youtubedl-android ships a full Python runtime **per ABI**, so including all four roughly doubles the APK for a device class almost nobody runs.
+- Release builds are **split per ABI** ([`withAbiSplits.js`](plugins/withAbiSplits.js)) into `arm64-v8a`, `armeabi-v7a`, and `x86_64`. `x86` is dropped as emulator-only. Beware: the `abiFilters` in the ytdlp module does *not* control this — it constrains that module's own native compilation, not the jniLibs the youtubedl-android AAR brings in transitively.
 - `useLegacyPackaging` is on in both [`app.json`](app.json) and [`build.gradle`](modules/ytdlp/android/build.gradle): the bundled Python payload is a zip that must stay uncompressed to be extractable at runtime. Turning this off produces an app that builds fine and fails at first download.
 - The WebView presents a **plain Chrome user agent**. Android's stock WebView UA contains `; wv`, which Google rejects on its sign-in flows.
 
@@ -273,6 +301,46 @@ npm run typecheck
 | `POST_NOTIFICATIONS` | Progress notification — declined only costs the notification |
 | `WAKE_LOCK` | Keeps long downloads alive |
 | `WRITE_EXTERNAL_STORAGE` | API ≤ 28 only; scoped storage handles it after that |
+
+## Cutting a release
+
+Releases are built by [GitHub Actions](.github/workflows/release.yml) and published to GitHub Releases:
+
+```bash
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+The workflow checks out clean, runs `expo prebuild`, builds a signed release APK, refuses to continue if the result is debug-signed, and attaches the APK plus a SHA-256 checksum to the release.
+
+### Signing
+
+`android/` is generated and gitignored, so a hand-edit to its `build.gradle` lasts exactly until the next prebuild. Signing is therefore applied by an Expo config plugin, [`plugins/withReleaseSigning.js`](plugins/withReleaseSigning.js), which runs *as part of* prebuild and so survives regeneration — including on a clean CI checkout.
+
+The plugin never contains credentials. It injects Gradle that reads four properties:
+
+| Property | Meaning |
+| --- | --- |
+| `SPOOL_STORE_FILE` | Absolute path to the `.jks` |
+| `SPOOL_STORE_PASSWORD` | Keystore password |
+| `SPOOL_KEY_ALIAS` | Key alias |
+| `SPOOL_KEY_PASSWORD` | Key password |
+
+Supply them via `-P` flags, `~/.gradle/gradle.properties`, or `ORG_GRADLE_PROJECT_*` environment variables. **When `SPOOL_STORE_FILE` is absent, release builds fall back to debug signing** — so contributors without a keystore can still build, and CI hard-fails rather than shipping a debug-signed artifact.
+
+For CI, add these repository secrets under Settings → Secrets and variables → Actions:
+
+`KEYSTORE_BASE64` (base64 of the `.jks`), `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`.
+
+> **Keep the keystore backed up.** Android identifies an app by its signing key. Lose it and you cannot ship an update — every user has to uninstall and reinstall, losing their download history.
+
+### Building an APK locally
+
+```bash
+npm run apk
+```
+
+Output lands in `android/app/build/outputs/apk/release/`. Without signing properties configured this produces a debug-signed APK, which is fine for testing and unfit for distribution.
 
 ## Troubleshooting
 
@@ -301,7 +369,9 @@ npm run typecheck
 
 YouTube's developer policies prohibit letting users download videos for offline play outside of YouTube Premium, and Google Play enforces this. Apps in this category get removed — sometimes at review, often after publishing. Apple's App Store is stricter still.
 
-So Spool is distributed by sideload: APK from GitHub Releases, or via [Obtainium](https://github.com/ImranR98/Obtainium). This is well-trodden ground — Seal, YTDLnis, and NewPipe all live here.
+So Spool is distributed by sideload: [APK from GitHub Releases](https://github.com/pardeepsinghverma/Spool/releases/latest), or via [Obtainium](https://github.com/ImranR98/Obtainium), which watches this repo and auto-updates from it. This is well-trodden ground — Seal, YTDLnis, and NewPipe all live here.
+
+Because there's no store doing it for you, **releases are the update channel**, and the in-app engine updater is what keeps a given build working between them.
 
 ## Legal
 

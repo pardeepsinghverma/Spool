@@ -19,8 +19,11 @@ android {
   defaultConfig {
     minSdk 24
     targetSdk 36
-    // youtubedl-android ships a Python runtime per ABI. Limiting the set keeps
-    // the APK from carrying four copies of it.
+    // Declares the ABIs this module supports. Note this does NOT keep the
+    // youtubedl-android AAR's per-ABI Python and ffmpeg payloads out of the
+    // final APK — abiFilters constrains this module's own native compilation,
+    // not transitive jniLibs. Size is controlled by the app-level ABI splits in
+    // plugins/withAbiSplits.js.
     ndk {
       abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
     }

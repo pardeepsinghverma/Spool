@@ -31,7 +31,9 @@
             "useLegacyPackaging": true
           }
         }
-      ]
+      ],
+      "./plugins/withReleaseSigning",
+      "./plugins/withAbiSplits"
     ]
   }
 }
