@@ -33,7 +33,8 @@
         }
       ],
       "./plugins/withReleaseSigning",
-      "./plugins/withAbiSplits"
+      "./plugins/withAbiSplits",
+      "./plugins/withPageSizeCompat"
     ]
   }
 }
