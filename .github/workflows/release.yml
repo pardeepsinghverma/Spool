@@ -17,7 +17,28 @@ permissions:
   contents: write
 
 jobs:
+  # The `secrets` context is not available in a job-level `if`, so the check for
+  # "are we able to sign at all" has to happen in a job of its own. A tag pushed
+  # before the secrets exist then skips cleanly instead of failing red.
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      signable: ${{ steps.check.outputs.signable }}
+    steps:
+      - id: check
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "signable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Signing secrets are not configured — skipping the release build. See README → Cutting a release."
+          fi
+
   build:
+    needs: preflight
+    if: needs.preflight.outputs.signable == 'true'
     runs-on: ubuntu-latest
 
     steps:
