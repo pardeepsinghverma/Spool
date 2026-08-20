@@ -1,0 +1,18 @@
+<!--
+  Transport glyphs for the media notification.
+
+  Android tints notification action icons itself, so these are flat white on
+  transparent at the platform's 24dp action size. They are the module's own
+  rather than android.R.drawable.ic_media_* because those are the 2011 holo set
+  and sit visibly wrong next to the system's own media controls.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M8,5v14l11,-7z" />
+</vector>

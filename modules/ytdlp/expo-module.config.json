@@ -1,6 +1,6 @@
 {
   "platforms": ["android"],
   "android": {
-    "modules": ["com.mdroppy.downloader.ytdlp.YtDlpModule"]
+    "modules": ["com.afinitycode.spool.ytdlp.YtDlpModule"]
   }
 }

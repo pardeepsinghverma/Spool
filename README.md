@@ -140,7 +140,7 @@ Format parsing is in **TypeScript, not Kotlin**. The native side runs `--dump-si
 
 A PO token is bound to the client that minted it. Spool's comes from the web page, so it is a **web** token and only validates against **web-client** requests. If you pass the token without pinning the client, yt-dlp identifies as `tv` or `ios`, the token is silently ignored, and the media fetch 403s.
 
-So [`applyExtractorArgs`](modules/ytdlp/android/src/main/java/com/mdroppy/downloader/ytdlp/YtDlpModule.kt) always sends them together:
+So [`applyExtractorArgs`](modules/ytdlp/android/src/main/java/com/afinitycode/spool/ytdlp/YtDlpModule.kt) always sends them together:
 
 ```
 --extractor-args "youtube:player_client=web;po_token=web.gvs+<token>;visitor_data=<data>"
@@ -153,7 +153,7 @@ Two subtleties that cost real debugging time:
 
 ### Cookie handoff
 
-[`CookieJar`](modules/ytdlp/android/src/main/java/com/mdroppy/downloader/ytdlp/CookieJar.kt) reads the WebView's session via Android's `CookieManager` — which sees `HttpOnly` cookies that page JavaScript cannot — and writes them to a Netscape-format cookie file for yt-dlp's `--cookies`.
+[`CookieJar`](modules/ytdlp/android/src/main/java/com/afinitycode/spool/ytdlp/CookieJar.kt) reads the WebView's session via Android's `CookieManager` — which sees `HttpOnly` cookies that page JavaScript cannot — and writes them to a Netscape-format cookie file for yt-dlp's `--cookies`.
 
 Details that matter: cookies are collected across `www.youtube.com`, `m.youtube.com`, `.youtube.com`, and `www.google.com` (consent lives there), de-duplicated by name, and stamped with a far-future expiry so yt-dlp doesn't discard them as session cookies. If the session has no cookies, `write()` returns `null` and the caller omits `--cookies` entirely rather than passing an empty file.
 
@@ -183,11 +183,11 @@ Merging uses **yt-dlp's bundled ffmpeg** (`--merge-output-format mp4`), not Andr
 
 Writing a file to app-private storage — or even dropping it into `Movies/` with raw file I/O — leaves it **invisible to Gallery** on modern Android. Only a MediaStore record makes it appear.
 
-[`MediaStoreWriter`](modules/ytdlp/android/src/main/java/com/mdroppy/downloader/ytdlp/MediaStoreWriter.kt) inserts with `IS_PENDING=1`, streams the file in, then clears the flag — so a half-copied file is never visible. On failure it deletes the orphaned row. Below API 29 it falls back to the legacy `DATA` column. Filenames are sanitised of `\/:*?"<>|` and capped at 120 characters.
+[`MediaStoreWriter`](modules/ytdlp/android/src/main/java/com/afinitycode/spool/ytdlp/MediaStoreWriter.kt) inserts with `IS_PENDING=1`, streams the file in, then clears the flag — so a half-copied file is never visible. On failure it deletes the orphaned row. Below API 29 it falls back to the legacy `DATA` column. Filenames are sanitised of `\/:*?"<>|` and capped at 120 characters.
 
 ### The foreground service
 
-[`DownloadService`](modules/ytdlp/android/src/main/java/com/mdroppy/downloader/ytdlp/DownloadService.kt) keeps the process alive while yt-dlp works, and owns the one surface this app has outside its own window.
+[`DownloadService`](modules/ytdlp/android/src/main/java/com/afinitycode/spool/ytdlp/DownloadService.kt) keeps the process alive while yt-dlp works, and owns the one surface this app has outside its own window.
 
 The ongoing notification is **silent and non-dismissible** with a CANCEL action; the completion notice is **dismissible, low priority, and never makes a sound**. Both channels are created with `IMPORTANCE_LOW`, no sound, no vibration. `YtDlpCancelBus` routes the notification's CANCEL action to the running yt-dlp process.
 
@@ -257,7 +257,7 @@ Two things worth stating plainly:
 │   └── ui/                      Design tokens, theme context
 └── modules/ytdlp/               Expo native module
     ├── index.ts                 Typed JS surface for the native module
-    └── android/src/main/java/com/mdroppy/downloader/ytdlp/
+    └── android/src/main/java/com/afinitycode/spool/ytdlp/
         ├── YtDlpModule.kt       Bridge: initialize, listFormats, download, cancel, update
         ├── CookieJar.kt         WebView session → Netscape cookie file
         ├── DownloadService.kt   Foreground service + notifications

@@ -1,4 +1,4 @@
-package com.mdroppy.downloader.ytdlp
+package com.afinitycode.spool.ytdlp
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -23,10 +23,10 @@ import androidx.core.app.NotificationCompat
 class DownloadService : Service() {
 
   companion object {
-    const val ACTION_START = "com.mdroppy.downloader.START"
-    const val ACTION_STOP = "com.mdroppy.downloader.STOP"
-    const val ACTION_PROGRESS = "com.mdroppy.downloader.PROGRESS"
-    const val ACTION_CANCEL = "com.mdroppy.downloader.CANCEL"
+    const val ACTION_START = "com.afinitycode.spool.START"
+    const val ACTION_STOP = "com.afinitycode.spool.STOP"
+    const val ACTION_PROGRESS = "com.afinitycode.spool.PROGRESS"
+    const val ACTION_CANCEL = "com.afinitycode.spool.CANCEL"
 
     const val EXTRA_ID = "id"
     const val EXTRA_TITLE = "title"

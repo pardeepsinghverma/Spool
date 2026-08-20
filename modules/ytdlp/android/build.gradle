@@ -2,7 +2,7 @@ apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 apply plugin: 'maven-publish'
 
-group = 'com.mdroppy.downloader.ytdlp'
+group = 'com.afinitycode.spool.ytdlp'
 version = '0.1.0'
 
 def expoModulesCorePlugin = new File(
@@ -12,13 +12,53 @@ def expoModulesCorePlugin = new File(
 apply from: expoModulesCorePlugin
 applyKotlinExpoModulesCorePlugin()
 
+/**
+ * Pre-release limits, stamped into the binary at build time.
+ *
+ * The expiry is computed here rather than stored on the device on purpose:
+ * there is nothing for a tester to clear, reset or reinstall past. It also
+ * means every APK cut from this tree carries its own deadline, so "extend the
+ * trial" is a rebuild rather than a server call.
+ *
+ * Override any of them from the command line, e.g.
+ *   ./gradlew :app:assembleRelease -PSPOOL_TRIAL=false
+ */
+def trialOn = (project.findProperty('SPOOL_TRIAL') ?: 'true').toBoolean()
+def trialDays = (project.findProperty('SPOOL_TRIAL_DAYS') ?: '7') as long
+def trialMaxSaves = (project.findProperty('SPOOL_TRIAL_SAVES') ?: '20') as int
+def trialMaxSeconds = (project.findProperty('SPOOL_TRIAL_SECONDS') ?: '180') as int
+def builtAt = System.currentTimeMillis()
+
+/**
+ * SHA-256 of the certificate release builds are signed with, so a repackaged
+ * build can tell that it is one. Not a secret — it is readable from any signed
+ * APK — so it lives in the tree rather than in a private properties file.
+ *
+ * Only applied to the release variant. Debug builds are signed with the debug
+ * keystore, and pinning there would make every local build refuse to run.
+ */
+def signingSha = project.findProperty('SPOOL_SIGNING_SHA256')
+  ?: '6A836D549AF7FEC349484FB625D11E77C678D6C2433736B16E0346BEB722F278'
+
 android {
-  namespace 'com.mdroppy.downloader.ytdlp'
+  namespace 'com.afinitycode.spool.ytdlp'
   compileSdk 36
+
+  buildFeatures {
+    buildConfig true
+  }
 
   defaultConfig {
     minSdk 24
     targetSdk 36
+
+    buildConfigField 'boolean', 'TRIAL', "${trialOn}"
+    buildConfigField 'long', 'BUILT_AT', "${builtAt}L"
+    buildConfigField 'long', 'TRIAL_EXPIRES_AT', "${builtAt + trialDays * 24 * 60 * 60 * 1000}L"
+    buildConfigField 'int', 'TRIAL_MAX_DOWNLOADS', "${trialMaxSaves}"
+    buildConfigField 'int', 'TRIAL_MAX_SECONDS', "${trialMaxSeconds}"
+    // Overridden for release below; empty here so debug builds do not pin.
+    buildConfigField 'String', 'SIGNING_SHA256', '""'
     // Declares the ABIs this module supports. Note this does NOT keep the
     // youtubedl-android AAR's per-ABI Python and ffmpeg payloads out of the
     // final APK — abiFilters constrains this module's own native compilation,
@@ -26,6 +66,12 @@ android {
     // plugins/withAbiSplits.js.
     ndk {
       abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
+    }
+  }
+
+  buildTypes {
+    release {
+      buildConfigField 'String', 'SIGNING_SHA256', "\"${signingSha}\""
     }
   }
 
@@ -65,4 +111,14 @@ dependencies {
 
   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
   implementation 'androidx.core:core-ktx:1.13.1'
+
+  // MediaSessionCompat and the MediaStyle notification behind background
+  // playback. The platform classes exist from API 21, but the compat pair is
+  // what makes one notification builder work down to this module's minSdk.
+  implementation 'androidx.media:media:1.7.0'
+
+  // Dominant-colour extraction for cover art. The design's whole premise is
+  // that surfaces derive from the artwork, and pixels are not reachable from
+  // JavaScript — this is the platform's own answer to exactly that problem.
+  implementation 'androidx.palette:palette-ktx:1.0.0'
 }

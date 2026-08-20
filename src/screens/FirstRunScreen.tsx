@@ -25,8 +25,8 @@ export function FirstRunScreen({ onStart, onChooseFolder }: Props) {
           Browse YouTube. Keep what's yours.
         </Text>
         <Text style={[styles.lede, { color: t.textDim }]}>
-          Spool has no ads, no account, no tracking. The page is never covered — the app
-          lives in the bar at the bottom.
+          Spool has no ads, no account, no tracking. Everything you keep stays on this
+          phone, and plays without a connection.
         </Text>
 
         <View
@@ -41,8 +41,8 @@ export function FirstRunScreen({ onStart, onChooseFolder }: Props) {
               This is the only button that matters
             </Text>
             <Text style={[styles.cardText, { color: t.textDim }]}>
-              When a video is playing, it turns blue and pulses. Tap it to choose a
-              quality.
+              It sits in the corner of Browse, grey until you open a video. Tap it to
+              choose a quality.
             </Text>
           </View>
         </View>

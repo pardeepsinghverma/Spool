@@ -4,19 +4,62 @@
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-  <!-- Only needed below API 29; scoped storage handles it after that. -->
+  <!--
+    Storage splits three ways by Android generation.
+
+    Publishing a download never needs permission on API 29+: MediaStore lets an
+    app insert its own media freely. Below that, writing into Movies/ or Music/
+    is ordinary file I/O and does need the grant.
+
+    Reading is the opposite. Once the app is reinstalled — or the row was
+    written by a previous install — its own published files count as someone
+    else's media, so listing them back requires a read permission. API 33 split
+    that single permission into per-type ones.
+  -->
   <uses-permission
     android:name="android.permission.WRITE_EXTERNAL_STORAGE"
     android:maxSdkVersion="28" />
+  <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+  <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
   <application>
     <service
       android:name=".DownloadService"
       android:exported="false"
       android:foregroundServiceType="dataSync" />
+
+    <!--
+      Keeps whatever is playing alive once the app is off screen — the browser's
+      <video> and the local player both. Declared mediaPlayback so the system
+      exempts it from the cached-process freezer and lets it run with the screen
+      off, and it takes the MEDIA_BUTTON intent so headset and Bluetooth keys
+      reach the session rather than nothing.
+    -->
+    <service
+      android:name=".PlaybackService"
+      android:exported="false"
+      android:foregroundServiceType="mediaPlayback">
+      <intent-filter>
+        <action android:name="android.intent.action.MEDIA_BUTTON" />
+      </intent-filter>
+    </service>
+
+    <!--
+      MediaSessionCompat looks for this at construction and logs the session as
+      unable to receive media buttons without it. It forwards the key to the
+      service above, which hands it to the session's own callback.
+    -->
+    <receiver
+      android:name="androidx.media.session.MediaButtonReceiver"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MEDIA_BUTTON" />
+      </intent-filter>
+    </receiver>
   </application>
 
 </manifest>

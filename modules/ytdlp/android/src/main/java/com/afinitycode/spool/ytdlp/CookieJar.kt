@@ -1,4 +1,4 @@
-package com.mdroppy.downloader.ytdlp
+package com.afinitycode.spool.ytdlp
 
 import android.content.Context
 import android.webkit.CookieManager

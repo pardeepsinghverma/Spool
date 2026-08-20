@@ -11,7 +11,7 @@
       "supportsTablet": true
     },
     "android": {
-      "package": "com.mdroppy.downloader",
+      "package": "com.afinitycode.spool",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -28,7 +28,9 @@
         "expo-build-properties",
         {
           "android": {
-            "useLegacyPackaging": true
+            "useLegacyPackaging": true,
+            "enableMinifyInReleaseBuilds": true,
+            "extraProguardRules": "# Expo resolves each module class by the name in expo-module.config.json, so R8\n# has no reference to follow and will happily delete it. Everything else in the\n# package is reached from here and may be renamed freely -- TrialGuard in\n# particular is meant to be obfuscated.\n-keep class com.afinitycode.spool.ytdlp.YtDlpModule { *; }\n\n# Named in the manifest, which R8 does not rewrite.\n-keep class com.afinitycode.spool.ytdlp.PlaybackService { *; }\n-keep class com.afinitycode.spool.ytdlp.DownloadService { *; }\n\n# The engine reaches its bundled Python payload through JNI and reflection.\n-keep class com.yausername.** { *; }\n-dontwarn com.yausername.**\n\n# The engine unzips its Python payload with commons-compress, whose\n# ExtraFieldUtils registers each extra-field type from a static block by\n# reflective newInstance(). R8 sees no constructor call, concludes the types are\n# never instantiated and makes them abstract; the static block then throws\n# \"class ... is not a concrete class\", the payload never unpacks, and ART caches\n# the failed class for the life of the install -- every download after it fails\n# with an error no message in the app can explain. Measured on an S21 FE: fresh\n# install, engine dead on first extract, permanently.\n-keep class org.apache.commons.compress.** { *; }\n-dontwarn org.apache.commons.compress.**"
           }
         }
       ],

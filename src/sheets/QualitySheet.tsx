@@ -41,7 +41,23 @@ type Props = {
   formats: FormatRow[];
   /** Rendered above the format list when storage is short. */
   storageWarning?: string | null;
+  /**
+   * "Similar already downloaded: …".
+   *
+   * It belongs in the sheet rather than in the browser's notice strip, because
+   * the sheet is a `Modal` and covers that strip completely — a warning drawn
+   * underneath it is the same as no warning. This is also simply where the
+   * decision is made, so it is where the fact needs to be.
+   */
+  duplicateWarning?: string | null;
   emptyReason?: string;
+  /**
+   * What a single tap on the download button grabs. Shown here because this
+   * sheet is what a hold opens, and the question "why did tapping give me
+   * audio?" is only ever asked at the moment the alternatives are on screen.
+   */
+  instant?: 'audio' | 'video';
+  onInstant?: (value: 'audio' | 'video') => void;
   onPick: (id: string) => void;
   onExpand: () => void;
   onCollapse: () => void;
@@ -63,7 +79,10 @@ export function QualitySheet({
   quickPicks,
   formats,
   storageWarning,
+  duplicateWarning,
   emptyReason,
+  instant,
+  onInstant,
   onPick,
   onExpand,
   onCollapse,
@@ -114,6 +133,7 @@ export function QualitySheet({
           <AllFormats
             formats={formats}
             storageWarning={storageWarning}
+            duplicateWarning={duplicateWarning}
             onPick={onPick}
             onCollapse={onCollapse}
           />
@@ -126,6 +146,9 @@ export function QualitySheet({
             video={video}
             picks={quickPicks}
             storageWarning={storageWarning}
+            duplicateWarning={duplicateWarning}
+            instant={instant}
+            onInstant={onInstant}
             onPick={onPick}
             onExpand={onExpand}
           />
@@ -139,18 +162,64 @@ function QuickPicks({
   video,
   picks,
   storageWarning,
+  duplicateWarning,
+  instant,
+  onInstant,
   onPick,
   onExpand,
 }: {
   video: Props['video'];
   picks: QuickPick[];
   storageWarning?: string | null;
+  duplicateWarning?: string | null;
+  instant?: 'audio' | 'video';
+  onInstant?: (value: 'audio' | 'video') => void;
   onPick: (id: string) => void;
   onExpand: () => void;
 }) {
   const { t } = useTheme();
   return (
     <>
+      {instant && onInstant && (
+        <View style={styles.instantRow}>
+          <Text style={[styles.instantLabel, { color: t.textDim }]}>
+            One tap downloads
+          </Text>
+          <View style={[styles.instantGroup, { backgroundColor: t.surface }]}>
+            {(['audio', 'video'] as const).map((kind) => {
+              const active = kind === instant;
+              return (
+                <Pressable
+                  key={kind}
+                  onPress={() => onInstant(kind)}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={`One tap downloads ${kind}`}
+                  style={[
+                    styles.instantOption,
+                    active && { backgroundColor: t.accent },
+                  ]}
+                >
+                  <MaterialIcons
+                    name={kind === 'audio' ? 'headphones' : 'smart-display'}
+                    size={15}
+                    color={active ? t.onAccent : t.textDim}
+                  />
+                  <Text
+                    style={[
+                      styles.instantText,
+                      { color: active ? t.onAccent : t.textDim },
+                    ]}
+                  >
+                    {kind === 'audio' ? 'Audio' : 'Video'}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      )}
+
       {video && (
         <View style={styles.videoRow}>
           <View style={[styles.thumb, { backgroundColor: t.ph }]}>
@@ -169,6 +238,10 @@ function QuickPicks({
       )}
 
       <View style={[styles.hair, { backgroundColor: t.border }]} />
+
+      {duplicateWarning && (
+        <Text style={[styles.storage, { color: t.warn }]}>{duplicateWarning}</Text>
+      )}
 
       {storageWarning && (
         <Text style={[styles.storage, { color: t.warn }]}>{storageWarning}</Text>
@@ -212,11 +285,13 @@ function QuickPicks({
 function AllFormats({
   formats,
   storageWarning,
+  duplicateWarning,
   onPick,
   onCollapse,
 }: {
   formats: FormatRow[];
   storageWarning?: string | null;
+  duplicateWarning?: string | null;
   onPick: (id: string) => void;
   onCollapse: () => void;
 }) {
@@ -254,6 +329,10 @@ function AllFormats({
           </View>
         ))}
       </View>
+
+      {duplicateWarning && (
+        <Text style={[styles.storage, { color: t.warn }]}>{duplicateWarning}</Text>
+      )}
 
       {storageWarning && (
         <Text style={[styles.storage, { color: t.warn }]}>{storageWarning}</Text>
@@ -407,6 +486,25 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     marginBottom: 12,
   },
+  instantRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: space.barSide,
+    paddingHorizontal: space.gutter,
+    paddingBottom: 14,
+  },
+  instantLabel: { ...type.body, fontSize: 12.5 },
+  instantGroup: { flexDirection: 'row', gap: 4, borderRadius: 9, padding: 3 },
+  instantOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    height: 30,
+    paddingHorizontal: 12,
+    borderRadius: 7,
+  },
+  instantText: { ...type.chip, fontSize: 12 },
   videoRow: {
     flexDirection: 'row',
     gap: space.barSide,
