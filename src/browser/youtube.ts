@@ -61,9 +61,9 @@ export function extractVideoId(url: string): string | null {
  * too few leaves a password field screen-recordable. Err wide.
  */
 const SIGN_IN_HOST =
-  /^https?:\/\/(?:accounts|myaccount|signin)\.(?:google|youtube)\.com(?:[/?#]|$)/i;
+  /^https?:\/\/(?:accounts|myaccount|signin|passwords|id)\.(?:google|youtube)\.com(?:[/?#]|$)/i;
 
-export function isSignInPage(url: string): boolean {
+export function isSignInPage(url: string | null | undefined): boolean {
   return SIGN_IN_HOST.test(url ?? '');
 }
 
@@ -98,6 +98,8 @@ export type FullscreenMessage = {
  */
 export const NAV_SCRIPT = `
 (function () {
+  // Never run or hook on Google authentication and account management pages
+  if (/(?:accounts|myaccount|signin|passwords|id)\.(?:google|youtube)\.com/i.test(location.hostname)) return;
   if (window.__dlNavHooked) return;
   window.__dlNavHooked = true;
 

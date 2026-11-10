@@ -22,6 +22,7 @@ import {
 } from '../core/storage';
 import {
   setScreenOrientation,
+  setSecureWindow,
   signOutOfYouTube,
   writeTextFile,
 } from '../core/ytdlp';
@@ -56,6 +57,7 @@ import {
   NAV_SCRIPT,
   USER_AGENT,
   isMusicUrl,
+  isSignInPage,
   type FullscreenMessage,
   type NavMessage,
 } from './youtube';
@@ -159,6 +161,17 @@ export function BrowserScreen() {
     if (/^https?:/i.test(url)) entryRef.current = url;
   }, [url]);
 
+  // Raise FLAG_SECURE on Google sign-in pages so passwords/2FA cannot be screen-recorded or leaked in recents
+  useEffect(() => {
+    setSecureWindow(isSignInPage(url));
+  }, [url]);
+
+  useEffect(() => {
+    return () => {
+      setSecureWindow(false);
+    };
+  }, []);
+
   // Back button handling
   useEffect(() => {
     const handler = () => {
@@ -235,7 +248,10 @@ export function BrowserScreen() {
 
   const onNavigationStateChange = useCallback((nav: WebViewNavigation) => {
     setCanGoBack(nav.canGoBack);
-    if (nav.url) setUrl(nav.url);
+    if (nav.url) {
+      setUrl(nav.url);
+      setSecureWindow(isSignInPage(nav.url));
+    }
   }, []);
 
   const onRenderProcessGone = useCallback(() => {
@@ -472,6 +488,13 @@ export function BrowserScreen() {
           domStorageEnabled
           javaScriptEnabled
           thirdPartyCookiesEnabled
+          allowFileAccess={false}
+          allowFileAccessFromFileURLs={false}
+          allowUniversalAccessFromFileURLs={false}
+          mixedContentMode="never"
+          saveFormDataDisabled
+          geolocationEnabled={false}
+          dataDetectorTypes="none"
           setSupportMultipleWindows={false}
           style={{ flex: 1, backgroundColor: t.pageBg }}
         />

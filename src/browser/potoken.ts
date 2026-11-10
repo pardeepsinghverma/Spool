@@ -89,6 +89,8 @@ export type PoTokenMessage = {
 
 export const POTOKEN_SCRIPT = `
 (function () {
+  // Never run or hook on Google authentication and account management pages
+  if (/(?:accounts|myaccount|signin|passwords|id)\.(?:google|youtube)\.com/i.test(location.hostname)) return;
   if (window.__dlPotHooked) return;
   window.__dlPotHooked = true;
 

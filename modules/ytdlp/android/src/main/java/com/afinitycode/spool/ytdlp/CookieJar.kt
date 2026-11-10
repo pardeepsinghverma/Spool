@@ -54,6 +54,7 @@ object CookieJar {
   private val ORIGINS = listOf(
     "https://www.youtube.com",
     "https://m.youtube.com",
+    "https://music.youtube.com",
     "https://.youtube.com",
     "https://www.google.com",
   )

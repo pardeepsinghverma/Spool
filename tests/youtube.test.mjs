@@ -1,7 +1,10 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { extractVideoId, isYouTube, isMusicUrl, hostOf, isSignInPage } from '../src/browser/youtube.ts';
+import { extractVideoId, isYouTube, isMusicUrl, hostOf, isSignInPage, NAV_SCRIPT } from '../src/browser/youtube.ts';
+import { ADBLOCK_SCRIPT } from '../src/browser/adblock.ts';
+import { POTOKEN_SCRIPT } from '../src/browser/potoken.ts';
+import { BACKGROUND_SCRIPT } from '../src/browser/background.ts';
 
 /**
  * `extractVideoId` decides two things that are easy to get wrong and expensive
@@ -182,6 +185,22 @@ describe('isSignInPage', () => {
       'https://accounts.google.co/',
     ]) {
       assert.equal(isSignInPage(url), false, url);
+    }
+  });
+
+  test('ensures all injected scripts refuse to run on Google sign-in / account domains', () => {
+    const scripts = [
+      ['NAV_SCRIPT', NAV_SCRIPT],
+      ['ADBLOCK_SCRIPT', ADBLOCK_SCRIPT],
+      ['POTOKEN_SCRIPT', POTOKEN_SCRIPT],
+      ['BACKGROUND_SCRIPT', BACKGROUND_SCRIPT],
+    ];
+    for (const [name, script] of scripts) {
+      assert.match(
+        script,
+        /accounts\|myaccount\|signin\|passwords\|id/,
+        `${name} must guard against executing on Google authentication pages`
+      );
     }
   });
 });

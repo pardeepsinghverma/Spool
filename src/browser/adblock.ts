@@ -62,6 +62,8 @@ const COSMETIC_SELECTORS = [
 
 export const ADBLOCK_SCRIPT = `
 (function () {
+  // Never run or hook on Google authentication and account management pages
+  if (/(?:accounts|myaccount|signin|passwords|id)\.(?:google|youtube)\.com/i.test(location.hostname)) return;
   if (window.__dlBlockInstalled) return;
   window.__dlBlockInstalled = true;
 

@@ -48,6 +48,8 @@ export type MediaMessage = {
 
 export const BACKGROUND_SCRIPT = `
 (function () {
+  // Never run or hook on Google authentication and account management pages
+  if (/(?:accounts|myaccount|signin|passwords|id)\.(?:google|youtube)\.com/i.test(location.hostname)) return;
   if (window.__spoolMedia) return;
 
   var wanted = false;      // what the user last asked for, not what is happening
