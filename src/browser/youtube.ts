@@ -101,6 +101,18 @@ export const NAV_SCRIPT = `
   if (window.__dlNavHooked) return;
   window.__dlNavHooked = true;
 
+  // Disarm beforeunload prompt so mode switching or navigating away is seamless
+  try {
+    window.addEventListener('beforeunload', function (e) {
+      delete e.returnValue;
+    }, true);
+    Object.defineProperty(window, 'onbeforeunload', {
+      get: function () { return null; },
+      set: function () {},
+      configurable: true
+    });
+  } catch (e) {}
+
   var last = '';
 
   // The bar borrows the page's own surface values, so it has to know which

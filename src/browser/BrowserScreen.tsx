@@ -347,8 +347,13 @@ export function BrowserScreen() {
                 onPress={() => {
                   if (isMusic) {
                     setUrl(HOME_URL);
+                    setEntry(HOME_URL);
                     void saveLastMode('youtube');
-                    webview.current?.injectJavaScript(`window.location.href = '${HOME_URL}'; true;`);
+                    webview.current?.injectJavaScript(`
+                      try { window.onbeforeunload = null; } catch (e) {}
+                      window.location.href = '${HOME_URL}';
+                      true;
+                    `);
                   }
                 }}
                 accessibilityRole="tab"
@@ -379,8 +384,13 @@ export function BrowserScreen() {
                 onPress={() => {
                   if (!isMusic) {
                     setUrl(MUSIC_HOME_URL);
+                    setEntry(MUSIC_HOME_URL);
                     void saveLastMode('ytmusic');
-                    webview.current?.injectJavaScript(`window.location.href = '${MUSIC_HOME_URL}'; true;`);
+                    webview.current?.injectJavaScript(`
+                      try { window.onbeforeunload = null; } catch (e) {}
+                      window.location.href = '${MUSIC_HOME_URL}';
+                      true;
+                    `);
                   }
                 }}
                 accessibilityRole="tab"
