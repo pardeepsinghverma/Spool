@@ -167,6 +167,10 @@ being wrong is a few seconds of replay. `stop()` writes `null`, which *removes*
 the key: stopping is a decision, not an interruption, and the next launch must
 not offer a place to return to.
 
+### `dl.lastMode` — the Browse mode — `src/core/storage.ts`
+
+`'youtube' | 'ytmusic'`, defaults to `'youtube'`. Persists whether the user last viewed standard YouTube (`m.youtube.com`) or YouTube Music (`music.youtube.com`), so launches restore the chosen mode.
+
 ### `dl.searches` — `src/core/storage.ts`
 
 `string[]`, **cap 8 at write** (`queries.slice(0, 8)`). Read path filters to

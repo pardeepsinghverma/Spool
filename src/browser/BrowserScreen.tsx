@@ -16,7 +16,9 @@ import * as log from '../core/log';
 import { remember } from '../core/tokens';
 import {
   hasSeenFirstRun,
+  loadLastMode,
   markFirstRunSeen,
+  saveLastMode,
 } from '../core/storage';
 import {
   setScreenOrientation,
@@ -132,10 +134,14 @@ export function BrowserScreen() {
     return watchLicence();
   }, []);
 
-  // Boot check for first-run onboarding
+  // Boot check for first-run onboarding and last selected mode
   useEffect(() => {
     void (async () => {
-      const seen = await hasSeenFirstRun();
+      const [seen, mode] = await Promise.all([hasSeenFirstRun(), loadLastMode()]);
+      if (mode === 'ytmusic') {
+        setEntry(MUSIC_HOME_URL);
+        setUrl(MUSIC_HOME_URL);
+      }
       setScreen(seen ? 'browse' : 'firstrun');
       setBooted(true);
     })();
@@ -341,6 +347,7 @@ export function BrowserScreen() {
                 onPress={() => {
                   if (isMusic) {
                     setUrl(HOME_URL);
+                    void saveLastMode('youtube');
                     webview.current?.injectJavaScript(`window.location.href = '${HOME_URL}'; true;`);
                   }
                 }}
@@ -372,6 +379,7 @@ export function BrowserScreen() {
                 onPress={() => {
                   if (!isMusic) {
                     setUrl(MUSIC_HOME_URL);
+                    void saveLastMode('ytmusic');
                     webview.current?.injectJavaScript(`window.location.href = '${MUSIC_HOME_URL}'; true;`);
                   }
                 }}

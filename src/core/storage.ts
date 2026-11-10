@@ -402,3 +402,20 @@ export async function saveSearches(queries: string[]): Promise<void> {
     // Recent searches are a convenience; a failed write is not worth reporting.
   }
 }
+
+const KEY_LAST_MODE = 'dl.lastMode';
+export type BrowseMode = 'youtube' | 'ytmusic';
+
+export async function loadLastMode(): Promise<BrowseMode> {
+  try {
+    const raw = await AsyncStorage.getItem(KEY_LAST_MODE);
+    if (raw === 'ytmusic' || raw === 'youtube') return raw;
+  } catch {}
+  return 'youtube';
+}
+
+export async function saveLastMode(mode: BrowseMode): Promise<void> {
+  try {
+    await AsyncStorage.setItem(KEY_LAST_MODE, mode);
+  } catch {}
+}
