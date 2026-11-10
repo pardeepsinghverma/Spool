@@ -112,6 +112,13 @@ export function BrowserScreen() {
     revision: '0',
   });
 
+  // Stop playback when locked
+  useEffect(() => {
+    if (appLocked) {
+      stopBrowserMedia();
+    }
+  }, [appLocked, stopBrowserMedia]);
+
   // Global sheet openers
   useEffect(() => {
     setPaywallOpener(() => setPaywallOpen(true));
@@ -495,7 +502,7 @@ export function BrowserScreen() {
       </View>
 
       {/* Mini player shown above the TabBar when on Account tab and web media is active */}
-      {screen !== 'browse' && (
+      {screen !== 'browse' && !appLocked && (
         <NowPlayingBar
           onOpen={() => setScreen('browse')}
           page={{
@@ -506,7 +513,7 @@ export function BrowserScreen() {
         />
       )}
 
-      {!isFullscreen && <TabBar value={screen} onChange={setScreen} />}
+      {!isFullscreen && !appLocked && <TabBar value={screen} onChange={setScreen} />}
 
       {appLocked && (
         <View
@@ -521,39 +528,56 @@ export function BrowserScreen() {
             },
           ]}
         >
-          <MaterialIcons name="lock" size={48} color={fixed.warn} style={{ marginBottom: 16 }} />
+          <MaterialIcons name="lock" size={54} color={fixed.warn} style={{ marginBottom: 16 }} />
           <Text
             style={{
               color: t.on,
-              fontSize: 20,
+              fontSize: 22,
               fontWeight: '700',
               textAlign: 'center',
               marginBottom: 8,
             }}
           >
-            Trial Period Ended
+            Subscription Required
           </Text>
           <Text
             style={{
               color: t.onDim,
               fontSize: 14,
               textAlign: 'center',
-              lineHeight: 20,
-              marginBottom: 24,
+              lineHeight: 22,
+              marginBottom: 28,
+              maxWidth: 320,
             }}
           >
-            This pre-release trial build has reached its expiry date. Subscribe to continue enjoying ad-free streaming.
+            An active subscription is required to use Spool. Subscribe now to enjoy unlimited, ad-free YouTube and YouTube Music with background playback.
           </Text>
           <Pressable
             onPress={() => setPaywallOpen(true)}
             style={{
               backgroundColor: t.accent,
-              paddingHorizontal: 24,
-              paddingVertical: 12,
+              paddingHorizontal: 28,
+              paddingVertical: 14,
               borderRadius: 24,
+              marginBottom: 14,
+              minWidth: 220,
+              alignItems: 'center',
             }}
           >
-            <Text style={{ color: t.onAccent, fontWeight: '700', fontSize: 15 }}>View Plans</Text>
+            <Text style={{ color: t.onAccent, fontWeight: '700', fontSize: 16 }}>
+              View Plans & Subscribe
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setAccountIntent({})}
+            style={{
+              paddingHorizontal: 20,
+              paddingVertical: 10,
+            }}
+          >
+            <Text style={{ color: t.onDim, fontWeight: '600', fontSize: 14 }}>
+              Already subscribed? Sign In
+            </Text>
           </Pressable>
         </View>
       )}

@@ -203,29 +203,7 @@ describe('refreshTrial', () => {
 });
 
 describe('isAppLocked', () => {
-  test('returns false when user is in an active trial with saves remaining', () => {
-    assert.equal(isAppLocked(status({ expiresAt: NOW + 7 * DAY, used: 2 })), false);
-  });
-
-  test('returns true when trial days have expired', () => {
-    assert.equal(isAppLocked(status({ expiresAt: NOW })), true);
-    assert.equal(isAppLocked(status({ expired: true })), true);
-  });
-
-  test('returns true when saves quota is exhausted', () => {
-    assert.equal(isAppLocked(status({ maxDownloads: 10, used: 10 })), true);
-    assert.equal(isAppLocked(status({ maxDownloads: 10, used: 15 })), true);
-  });
-
-  test('returns true when build is tampered', () => {
-    assert.equal(isAppLocked(status({ intact: false })), true);
-  });
-
-  test('returns true when not on trial and not entitled', () => {
-    assert.equal(isAppLocked(status({ trial: false })), true);
-  });
-
-  test('returns false when entitled even if trial is expired or spent', () => {
+  test('returns false when user is subscribed and entitled', () => {
     handlers.licenceStatus = () => ({
       entitled: true,
       expiresAt: NOW + 30 * DAY,
@@ -235,7 +213,26 @@ describe('isAppLocked', () => {
     });
     refreshLicence();
 
+    assert.equal(isAppLocked(), false);
     assert.equal(isAppLocked(status({ expired: true, used: 999 })), false);
     assert.equal(isAppLocked(status({ trial: false })), false);
+  });
+
+  test('returns true when user has not subscribed (app locked until subscription is done)', () => {
+    handlers.licenceStatus = () => ({
+      entitled: false,
+      expiresAt: 0,
+      plan: '',
+      device: 'dev-1',
+      server: 'https://licence.example',
+    });
+    refreshLicence();
+
+    assert.equal(isAppLocked(), true);
+    assert.equal(isAppLocked(status({ expiresAt: NOW + 7 * DAY, used: 2 })), true);
+    assert.equal(isAppLocked(status({ expired: true })), true);
+    assert.equal(isAppLocked(status({ maxDownloads: 10, used: 10 })), true);
+    assert.equal(isAppLocked(status({ intact: false })), true);
+    assert.equal(isAppLocked(status({ trial: false })), true);
   });
 });

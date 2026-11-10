@@ -134,19 +134,11 @@ export function useTrial(): TrialStatus {
  * Whether the entire app is locked.
  *
  * An active subscriber (`licence().entitled`) has full access to the entire app.
- * A user whose trial is active (`status.trial && !status.expired && daysLeft(status) > 0 && savesLeft(status) > 0 && status.intact`)
- * has trial access to browse and test the app in the foreground.
- *
- * Once the trial expires or if quota is spent and no active plan is held,
- * the entire app is locked until subscribed.
+ * The app is locked until the subscription is completed.
  */
-export function isAppLocked(status: TrialStatus = cached): boolean {
+export function isAppLocked(_status: TrialStatus = cached): boolean {
   if (licence().entitled) return false;
-  if (!status.trial) return true;
-  if (!status.intact) return true;
-  if (status.expired || daysLeft(status) <= 0) return true;
-  if (savesLeft(status) <= 0) return true;
-  return false;
+  return true;
 }
 
 /** Re-renders when either trial status or subscription entitlement changes. */
