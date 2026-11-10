@@ -226,6 +226,7 @@ export const NAV_SCRIPT = `
 
   window.addEventListener('popstate', function () { report('popstate'); });
   window.addEventListener('yt-navigate-finish', function () { report('yt-navigate'); });
+  window.addEventListener('ytmusic-navigate-finish', function () { report('ytmusic-navigate'); });
   document.addEventListener('fullscreenchange', reportFullscreen);
   document.addEventListener('webkitfullscreenchange', reportFullscreen);
 

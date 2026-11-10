@@ -72,72 +72,22 @@ export type Storage = {
 };
 
 type Props = {
-  autoSave: AutoSave;
-  onAutoSave: (next: AutoSave) => void;
-  storage: Storage;
-  engineSummary: string;
-  /**
-   * Three states, not two. The engine can report a version it has no record of
-   * — youtubedl-android only knows one after an update has run — and painting
-   * that green would say "up to date" about something we have not established.
-   * Green is a claim; neutral is the absence of one.
-   */
-  engineTone: 'good' | 'warn' | 'neutral';
+  autoSave?: AutoSave;
+  onAutoSave?: (next: AutoSave) => void;
+  storage?: Storage;
+  engineSummary?: string;
+  engineTone?: 'good' | 'warn' | 'neutral';
   onEngine?: () => void;
   onAudioQuality?: () => void;
   onVideoQuality?: () => void;
-  /**
-   * Writes the playlists out to Downloads/Spool. Absent while there are none —
-   * a row offering to export nothing is a row that does nothing.
-   */
   onExport?: () => void;
-  /** "3 playlists · 41 tracks", so the row says what it would write. */
   exportSummary?: string;
-  /**
-   * Writes the flight recorder out to Downloads/Spool as a text file.
-   *
-   * Present unconditionally, unlike the backup row above it: there is always a
-   * log, and the moment someone needs this is the moment something has gone
-   * wrong — which is the worst possible time for the row to have hidden itself.
-   */
   onDiagnostics?: () => void;
-  /**
-   * Drops this device's YouTube session. Always offered, even when nobody has
-   * signed in: the app cannot read whether a session exists without going to
-   * the native side for it, and a row that appears only once you are signed in
-   * is a row you cannot find when you want it.
-   */
   onSignOut?: () => void;
-  /** "412 entries · 1 crash", so the row says what it would write. */
   diagnosticsSummary?: string;
 };
 
-const KEEP: { key: KeepAs; label: string; icon: keyof typeof MaterialIcons.glyphMap }[] = [
-  { key: 'audio', label: 'Audio', icon: 'headphones' },
-  { key: 'video', label: 'Video', icon: 'smart-display' },
-  { key: 'match', label: 'Match', icon: 'auto-awesome' },
-];
-
-const INSTANT: {
-  key: 'audio' | 'video';
-  label: string;
-  icon: keyof typeof MaterialIcons.glyphMap;
-}[] = [
-  { key: 'audio', label: 'Audio', icon: 'headphones' },
-  { key: 'video', label: 'Video', icon: 'smart-display' },
-];
-
 export function ProfileScreen({
-  autoSave,
-  onAutoSave,
-  storage,
-  engineSummary,
-  engineTone,
-  onEngine,
-  onAudioQuality,
-  onVideoQuality,
-  onExport,
-  exportSummary,
   onDiagnostics,
   onSignOut,
   diagnosticsSummary,
@@ -146,7 +96,6 @@ export function ProfileScreen({
   const lic = useLicence();
   const { email } = useAccount();
   const licenceDays = daysLeft(lic);
-  const set = (patch: Partial<AutoSave>) => onAutoSave({ ...autoSave, ...patch });
   const [paywallOpen, setPaywallOpen] = useState(false);
   const [accountIntent, setAccountIntent] = useState<AccountIntent | null>(null);
 
@@ -161,18 +110,6 @@ export function ProfileScreen({
             <Text style={[styles.identityTitle, { color: t.on }]} numberOfLines={1}>
               {email ?? 'This device'}
             </Text>
-            {/* The claim is about what leaves *this phone*, and it is stated at
-                the scope where it is exact. Signed out, nothing does unless a
-                subscription is bought. Signed in, the server knows the email,
-                a hash of ANDROID_ID, a device name the user would recognise
-                in their device list, and — to enforce one-device-at-a-time
-                playback — *when* this phone starts and stops playing. Never
-                what: no titles, no library, no search. Saying "nothing
-                leaves" while a play lock reports start and stop would be the
-                half-truth this file's copy rules exist to refuse.
-
-                A payment also sends a screenshot of a UPI receipt, which
-                names the payer; that is said on the paywall where it happens. */}
             <Text style={[styles.identitySub, { color: t.onDim }]}>
               {email ? 'Spool account · signed in' : 'No account · nothing leaves the phone'}
             </Text>
@@ -182,11 +119,6 @@ export function ProfileScreen({
 
         <Text style={[styles.section, { color: t.onDim }]}>Subscription</Text>
 
-        {/* Deliberately a row rather than a banner. A subscriber has nothing to
-            do here and should not be sold to twice; someone who has not paid has
-            the paywall one tap away from where they already are. */}
-        {/* The account row comes first because the subscription belongs to
-            it: signed out, "Subscribe" leads here anyway. */}
         <SettingRow
           label={email ? 'Account' : 'Sign in'}
           value={email ?? 'Use it on every phone'}
@@ -204,9 +136,7 @@ export function ProfileScreen({
                 ? 'Active'
                 : `${licenceDays} ${licenceDays === 1 ? 'day' : 'days'} left`
               : lic.paidThrough && lic.paidThrough > Date.now()
-                ? // Paid, but the short lease has run out while offline: the
-                  // date is still true, and the next sync restores the rest.
-                  `Paid to ${formatDate(lic.paidThrough)}`
+                ? `Paid to ${formatDate(lic.paidThrough)}`
                 : `${PRICES.annual?.amount || '₹249'} a year`
           }
           valueColour={lic.entitled ? fixed.saved : undefined}
@@ -214,238 +144,17 @@ export function ProfileScreen({
         />
 
         <Text style={[styles.section, styles.sectionAfterRow, { color: t.onDim }]}>
-          Keep automatically
+          Session & Settings
         </Text>
 
-        <View style={[styles.card, { borderColor: fixed.line }]}>
-          <View style={styles.switchRow}>
-            <Text style={[styles.switchLabel, { color: t.on }]}>Save what I replay</Text>
-            <Pressable
-              onPress={() => set({ enabled: !autoSave.enabled })}
-              accessibilityRole="switch"
-              accessibilityState={{ checked: autoSave.enabled }}
-              accessibilityLabel="Save what I replay"
-              style={[
-                styles.switchTrack,
-                {
-                  backgroundColor: autoSave.enabled ? t.accent : fixed.line,
-                  justifyContent: autoSave.enabled ? 'flex-end' : 'flex-start',
-                },
-              ]}
-            >
-              <View
-                style={[
-                  styles.switchThumb,
-                  { backgroundColor: autoSave.enabled ? t.onAccent : fixed.mute },
-                ]}
-              />
-            </Pressable>
-          </View>
-          {/* States the real threshold. The earlier copy promised a play had to
-              reach the end, which the counter never measured — a settings
-              screen that describes a rule the code does not run is worse than
-              one that says nothing. */}
-          <Text style={[styles.help, { color: t.onDim }]}>
-            A play counts after five seconds of watching. Scrubbing and muted
-            previews never count.
-          </Text>
-
-          <View style={styles.afterRow}>
-            <Text style={[styles.fieldLabel, { color: t.onDim }]}>After</Text>
-            <Text style={[styles.fieldValue, { color: t.accent }]}>
-              {autoSave.after} plays
-            </Text>
-          </View>
-          <View style={styles.steps}>
-            {PLAY_THRESHOLDS.map((n) => {
-              const active = n === autoSave.after;
-              return (
-                <Pressable
-                  key={n}
-                  onPress={() => set({ after: n })}
-                  accessibilityRole="radio"
-                  accessibilityState={{ selected: active }}
-                  accessibilityLabel={`After ${n} plays`}
-                  style={styles.step}
-                >
-                  <View
-                    style={[
-                      styles.stepTrack,
-                      { backgroundColor: active ? t.accent : fixed.line },
-                    ]}
-                  />
-                  <Text
-                    style={[
-                      styles.stepLabel,
-                      { color: active ? t.accent : fixed.mute },
-                    ]}
-                  >
-                    {n}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-
-          <Text style={[styles.fieldLabel, styles.keepLabel, { color: t.onDim }]}>
-            Keep as
-          </Text>
-          <View style={[styles.segmented, { backgroundColor: fixed.raised }]}>
-            {KEEP.map(({ key, label, icon }) => {
-              const active = key === autoSave.keepAs;
-              return (
-                <Pressable
-                  key={key}
-                  onPress={() => set({ keepAs: key })}
-                  accessibilityRole="radio"
-                  accessibilityState={{ selected: active }}
-                  accessibilityLabel={label}
-                  style={[
-                    styles.segment,
-                    active && { backgroundColor: t.accent },
-                  ]}
-                >
-                  <MaterialIcons
-                    name={icon}
-                    size={16}
-                    color={active ? t.onAccent : t.onDim}
-                  />
-                  <Text
-                    style={[
-                      active ? type.chipActive : type.chip,
-                      { color: active ? t.onAccent : t.onDim },
-                    ]}
-                  >
-                    {label}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-
-          <SettingRow
-            label="Audio quality"
-            value={autoSave.audioQuality}
-            onPress={onAudioQuality}
-          />
-          <SettingRow
-            label="Video quality"
-            value={autoSave.videoQuality}
-            onPress={onVideoQuality}
-          />
-        </View>
-
-        <Text style={[styles.section, { color: t.onDim }]}>The download button</Text>
-
-        <View style={[styles.card, { borderColor: fixed.line }]}>
-          <Text style={[styles.fieldLabel, styles.keepLabel, { color: t.onDim }]}>
-            One tap downloads
-          </Text>
-          <View style={[styles.segmented, { backgroundColor: fixed.raised }]}>
-            {INSTANT.map(({ key, label, icon }) => {
-              const active = key === autoSave.instant;
-              return (
-                <Pressable
-                  key={key}
-                  onPress={() => set({ instant: key })}
-                  accessibilityRole="radio"
-                  accessibilityState={{ selected: active }}
-                  accessibilityLabel={`One tap downloads ${label}`}
-                  style={[styles.segment, active && { backgroundColor: t.accent }]}
-                >
-                  <MaterialIcons
-                    name={icon}
-                    size={16}
-                    color={active ? t.onAccent : t.onDim}
-                  />
-                  <Text
-                    style={[
-                      active ? type.chipActive : type.chip,
-                      { color: active ? t.onAccent : t.onDim },
-                    ]}
-                  >
-                    {label}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-          <Text style={[styles.help, styles.helpLast, { color: t.onDim }]}>
-            Hold the button for three seconds to see every format instead.
-          </Text>
-        </View>
-
-        <Text style={[styles.section, { color: t.onDim }]}>Storage</Text>
-        {storage.ours != null && (
-          <View style={[styles.meter, { backgroundColor: fixed.raised }]}>
-            <View
-              style={{
-                width: `${Math.round(storage.ours * 100)}%`,
-                backgroundColor: t.accent,
-              }}
-            />
-            <View
-              style={{
-                width: `${Math.round(storage.others * 100)}%`,
-                backgroundColor: t.tint,
-              }}
-            />
-          </View>
-        )}
-        <View style={styles.meterLabels}>
-          <Text style={[styles.mono, { color: t.onDim }]}>{storage.used}</Text>
-          {storage.free.length > 0 && (
-            <Text style={[styles.mono, { color: fixed.mute }]}>{storage.free}</Text>
-          )}
-        </View>
-
-        {/* App data dies with an uninstall and MediaStore records do not, which
-            is why the library rebuilds itself and the *arrangement* of it
-            cannot. This is the one way an arrangement becomes a file. */}
-        {onExport && (
-          <SettingRow
-            label="Back up playlists"
-            value={exportSummary ?? ''}
-            onPress={onExport}
-          />
-        )}
-
-        {/* A "Wi-Fi only" row used to sit here. Nothing enforced it: reading the
-            connection type needs a native probe this build does not have, so the
-            row asserted a policy the app did not run. Same rule as the storage
-            meter above — an absence is honest, a claim is not. */}
-        <SettingRow
-          label="Extraction engine"
-          value={engineSummary}
-          valueColour={
-            engineTone === 'good'
-              ? fixed.saved
-              : engineTone === 'warn'
-                ? fixed.warn
-                : undefined
-          }
-          onPress={onEngine}
-        />
-
-        {/* Signing in is the browser's business and the session is the
-            browser's to keep — but signing out had nowhere to live, so it lives
-            here, next to the other things that act on stored state. The value
-            says what it costs rather than what it is, because "Sign out" alone
-            reads as if it might take the library with it. */}
         {onSignOut && (
           <SettingRow
             label="Sign out of YouTube"
-            value="Library stays"
+            value="Clear session"
             onPress={onSignOut}
           />
         )}
 
-        {/* The app keeps a running record of what it did and why — see
-            src/core/log.ts. This is the only way it leaves the device, and it
-            leaves as a file the user can read first rather than as a report
-            sent anywhere. There is a licence server now, and it is not a
-            destination for this: nothing in this file or src/core/export.ts
-            can reach it. */}
         {onDiagnostics && (
           <SettingRow
             label="Export diagnostics"
@@ -455,8 +164,7 @@ export function ProfileScreen({
         )}
 
         <Text style={[styles.legal, { color: fixed.mute }]}>
-          Built for your own uploads, Creative Commons and public-domain
-          material, and personal offline use where your local law allows it.
+          Ad-free YouTube & YouTube Music player. Built for your personal offline and online listening.
         </Text>
       </ScrollView>
       {paywallOpen ? (

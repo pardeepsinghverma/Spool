@@ -13,6 +13,7 @@ import {
 } from '../player/nowPlaying';
 import { mediaCommand, seekCommand, setPageBackgrounded, type MediaMessage } from './background';
 import { pagePlayback, setPagePlayback } from './pageNowPlaying';
+import { isMusicUrl } from './youtube';
 
 /**
  * The app half of browser background playback.
@@ -98,7 +99,7 @@ export function useBackgroundPlayback(
    * same verb as a no-op.
    */
   const say = useCallback(
-    (command: 'play' | 'pause' | 'stop') => {
+    (command: 'play' | 'pause' | 'stop' | 'next' | 'prev') => {
       inject(mediaCommand(command));
       try {
         YtDlp.setPageCommand(command, Date.now());
@@ -136,7 +137,7 @@ export function useBackgroundPlayback(
         // What the card cannot otherwise say: this is a page, not a file. The
         // difference is not cosmetic — a page stops when the tab moves on, and
         // its buttons behave differently from a saved track's.
-        source: 'YouTube',
+        source: m.music ? 'YouTube Music' : 'YouTube',
         playing: m.playing,
         // The page has no file and no library row, so the cover comes from the
         // thumbnail. Resolved under its own key — see resolveVideoArtwork.
@@ -145,10 +146,6 @@ export function useBackgroundPlayback(
         // working scrubber rather than the blank one it had.
         position: m.at,
         duration: m.length,
-        // YouTube's own up-next is what advances a Mix, and reaching it means
-        // clicking a button on a page the app cannot talk to while it is
-        // backgrounded. A skip control here would be dead exactly when it was
-        // wanted, so there is none.
         canNext: false,
         canPrevious: false,
         /**
@@ -479,9 +476,6 @@ export function useBackgroundPlayback(
           if (m && !m.playing) raise({ ...m, playing: false });
         }, PLAY_GRACE_MS);
       }
-      // Skipping is YouTube's own up-next, which lives behind a button on a
-      // page — so the card never offers it for this source, and nothing here
-      // has to pretend otherwise.
       if (command !== 'play' && command !== 'pause' && command !== 'stop') return;
       say(command);
       if (command === 'stop') {

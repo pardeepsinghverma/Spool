@@ -1,5 +1,21 @@
 import type { Format } from '../core/engine';
-import type { FormatRow, QuickPick } from '../sheets/QualitySheet';
+
+export type FormatRow = {
+  id: string;
+  res: string;
+  note: string;
+  codec: string;
+  size: string;
+  tooLarge?: boolean;
+};
+
+export type QuickPick = {
+  id: string;
+  icon: string;
+  title: string;
+  detail: string;
+  highlight?: boolean;
+};
 
 const MB = 1_000_000;
 

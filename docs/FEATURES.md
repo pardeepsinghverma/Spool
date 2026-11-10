@@ -9,20 +9,17 @@ debugging. Do not "simplify" one without reading why it is there.
 
 ---
 
-## The five tabs
+## The two screens
 
-`src/shell/TabBar.tsx` — `home | search | browse | library | profile`. Local
-first on the left, the open web in the middle, everything you own on the right.
+`src/shell/TabBar.tsx` — `browse | account`.
 Switching is instant; a tab that animates feels slower than one that does not.
 
-The shell (`BrowserScreen`) renders the WebView once and lays the four local
-tabs over it as absolutely-positioned views. The WebView is **never unmounted**
-— leaving Browse must not cost a page reload.
+The shell (`BrowserScreen`) renders the WebView once and lays the Account screen
+over it when active. The WebView is **never unmounted** — leaving Browse must not
+cost a page reload or interrupt background playback.
 
-Back-button precedence, in order: picker sheet → full player → quality sheet →
-**open playlist** → WebView history (on Browse) → return to Browse from any
-other tab → exit. A playlist is a place inside the Library tab, so back leaves
-it before back leaves the tab.
+Back-button precedence, in order: fullscreen exit → WebView history (on Browse) →
+return to Browse from Account tab → exit.
 
 ---
 

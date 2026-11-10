@@ -5,21 +5,15 @@ import { useTheme } from '../ui/ThemeContext';
 import { fixed, size, type } from '../ui/theme';
 
 /**
- * The five tabs. See docs/UI.md §02.
- *
- * Local first on the left, the open web in the middle, everything you own on
- * the right. Switching is instant by design — a tab that animates feels slower
- * than one that does not, and there is nothing to explain between two lists.
+ * The two screens: Browse (YouTube / YouTube Music) and Account.
+ * Switching is instant by design.
  */
 
-export type Tab = 'home' | 'search' | 'browse' | 'library' | 'profile';
+export type Tab = 'browse' | 'account' | 'profile';
 
-const TABS: { key: Tab; label: string; icon: keyof typeof MaterialIcons.glyphMap }[] = [
-  { key: 'home', label: 'Home', icon: 'home' },
-  { key: 'search', label: 'Search', icon: 'search' },
+const TABS: { key: 'browse' | 'account'; label: string; icon: keyof typeof MaterialIcons.glyphMap }[] = [
   { key: 'browse', label: 'Browse', icon: 'explore' },
-  { key: 'library', label: 'Library', icon: 'library-music' },
-  { key: 'profile', label: 'Profile', icon: 'person' },
+  { key: 'account', label: 'Account', icon: 'person' },
 ];
 
 export function TabBar({
@@ -45,7 +39,7 @@ export function TabBar({
       ]}
     >
       {TABS.map(({ key, label, icon }) => {
-        const active = key === value;
+        const active = key === value || (key === 'account' && value === 'profile');
         return (
           <Pressable
             key={key}
@@ -57,7 +51,7 @@ export function TabBar({
           >
             <MaterialIcons
               name={icon}
-              size={21}
+              size={22}
               color={active ? t.accent : fixed.mute}
             />
             <Text

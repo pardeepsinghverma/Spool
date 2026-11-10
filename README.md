@@ -67,44 +67,20 @@ sha256sum -c SHA256SUMS.txt --ignore-missing
 
 ## What it does
 
-Five tabs — `home | search | browse | library | profile`
-([`src/shell/TabBar.tsx`](src/shell/TabBar.tsx)). Local first on the left, the
-open web in the middle, everything you own on the right. The WebView is mounted
-once and **never unmounted**; the four local tabs are laid over it, because
-leaving Browse must not cost a page reload.
+Two screens — `Browse` and `Account`
+([`src/shell/TabBar.tsx`](src/shell/TabBar.tsx)). Stream YouTube and YouTube Music ad-free on Browse, and manage user identity and subscriptions in Account. The WebView is mounted
+once and **never unmounted**; leaving Browse must not cost a page reload or interrupt background playback.
 
 Detail for every one of these lives in
 [`docs/FEATURES.md`](docs/FEATURES.md), whose sections the `§` marks below refer
 to. This list is a map, not documentation.
 
-- **Browse** — YouTube and YouTube Music in a real WebView with a 1-tap mode switcher, three-layer ad blocking, and SPA
-  navigation tracking. Audio-prioritized downloads on YT Music. `§ 1`
-- **Download** — tap the FAB and it commits to whatever one-tap is set to
-  (`audio` by default); hold it three seconds for the quality sheet. Any rung
-  YouTube offers, or audio extracted to `.m4a`. `§ 2`
-- **A library that rebuilds itself** — manual saves are MediaStore records in
-  `Music/Spool` or `Movies/Spool`, and those survive an uninstall. `scanSaved` +
-  `adoptSaved` read them back, so a reinstalled Spool does not show an empty
-  library over a folder full of music. `§ 4`
-- **A local player with a queue** — two engines, one seat, so exactly one thing
-  is ever playing. Full player, mini bar, sleep timer, session resume. `§ 8`
-- **One media notification, arbitrated** — the browser's `<video>` and the local
-  player know nothing about each other and Android has room for one card per
-  app, so `src/player/nowPlaying.ts` decides. You take the card by playing; a
-  source making no sound cannot take one from a source that is. `§ 9`
-- **Background playback for the page too** — the WebView keeps playing off
-  screen, which takes considerably more machinery than it sounds like. `§ 10`
-- **The replay rule** — play something three times (the threshold is yours) and
-  Spool keeps it, without asking and without a notification. Those saves stay
-  app-private. `§ 3`
-- **Playlists, export and backup** — `.m3u8` per playlist plus one JSON backup
-  into `Downloads/Spool`, because an arrangement is not a file and nothing else
-  would rebuild it. `§ 4`
-- **Lyrics** — the one request that is not YouTube's, off until you have read
-  what is sent and agreed. `§ 8`
+- **Browse** — YouTube and YouTube Music in a real WebView with a 1-tap mode switcher, built-in ad blocking (just like Brave browser), and SPA navigation tracking. `§ 1`
+- **Background playback** — YouTube & YouTube Music keep playing off screen or with the phone locked, with media notification & lock-screen controls. `§ 10`
+- **Account & Subscriptions** — Simple profile and subscription management with UPI payments and device licensing. `§ 17`
 - **A flight recorder** — structured, correlated, redacted and bounded, with the
   previous run kept aside so a crash cannot overwrite its own explanation.
-  Profile → Export diagnostics writes it to `Downloads/Spool`. `§ 16`
+  Account → Export diagnostics writes it to `Downloads/Spool`. `§ 16`
 
 Things that look missing and are deliberately absent — casting, a storage
 capacity meter, Wi-Fi-only downloads, pause/resume for downloads, folders, iOS —

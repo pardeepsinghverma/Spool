@@ -139,49 +139,15 @@ consumer before describing one.
 
 ---
 
-## The five tabs
+## The two screens
 
-`Home · Search · Browse · Library · Profile` — local first on the left, the open
-web in the middle, everything owned on the right. **The mini player sits above
-the tab bar on the four local tabs and never unmounts.**
+`Browse · Account` — stream ad-free YouTube and YouTube Music on Browse, and manage user identity and subscriptions in Account.
 
-It is deliberately absent on **Browse**. That tab is someone else's page at full
-bleed, and the FAB is already one control of ours sitting on top of it; a second
-would make the page feel framed. The cost is real and accepted: audio started
-from the library has no visible transport while browsing, so pausing means
-leaving the tab. Playback itself continues, and the lock screen still holds the
-controls.
+**Screen 1: Browse** — the site's own page, supported across both standard YouTube and YouTube Music. A top header provides a segmented `[ YouTube | YT Music ]` switcher, back button when history exists, reload control, and a thin loading bar. Full-bleed WebView loads the selected service with built-in Brave-style ad-blocking (InnerTube response scrubbing, cosmetic filtering, video ad fast-forwarding/skipping, and automatic promo dismissals) and background playback.
 
-**Home** — Recently added (124px 1:1 cards), then On repeat (46px rows with play
-counts). The green tick here is the only place a completed auto-download is ever
-announced, and it appears **only where the rule did the saving** — a file the
-user chose themselves never earns it, or the signal is spent on nothing.
+**Screen 2: Account** — identity and subscription management. Shows the user's account details, device identity, subscription status (active plan, days remaining, or upgrade pricing), Account/Sign In sheet, Subscribe paywall sheet, YouTube session sign-out, and diagnostics export.
 
-On repeat is the real counter, most-played first, subtitled "3 plays · 41 min".
-That makes it the honest answer to "is the tracking working?", which is why it
-shows counts rather than a curated list. Its `more-vert` forgets the counts for
-that video after confirming, and says plainly that anything already saved stays.
-
-The four chips — All / Music / Video / Offline — **filter both lists**. They
-shipped inert: highlighting on tap and changing nothing, which is precisely what
-this design keeps refusing to do everywhere else. *Music* and *Video* split on
-what the page was, not on what was saved from it, so a music page that has never
-been kept still files under Music. *Offline* means already on the device, which
-is every card (a card exists only once a file does) and the saved subset of On
-repeat.
-
-There is **no cast button** in the header. The mock has one; the player already
-drops it because there is nothing to cast to, and keeping it here made the app
-claim a capability in one place and deny it in another.
-
-**Search** — the local index answers instantly. The cloud is a button
-("Search YouTube for X"), never an automatic second query. Off-artwork screens
-stay on the neutral base.
-
-**Browse** — the site's own page, supported across both standard YouTube and YouTube Music. A minimalist top header provides a segmented `[ YouTube | YT Music ]` switcher, back button when history exists, reload control, and a thin loading bar. On a feed the
-FAB sits inert at `line` colour. On a watch page it wakes: filled, tinted,
-pulsing three times. On YouTube Music, instant downloads automatically prioritize Audio format. That state change is the only notice that something can be
-kept.
+When web media is playing in the background and the user navigates to the Account tab, `NowPlayingBar` floats above the bottom TabBar with playback controls and track metadata, allowing one-tap return to the Browse view.
 
 **Tap and hold do different things.** A tap commits: it downloads whatever
 *One tap downloads* is set to (Audio or Video) with no sheet, because the common

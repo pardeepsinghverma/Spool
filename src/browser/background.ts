@@ -302,7 +302,7 @@ export const BACKGROUND_SCRIPT = `
 
     if (!artist) {
       var owner = document.querySelector(
-        'ytm-slim-owner-renderer a, ytm-channel-name a, #owner-name a, ytd-channel-name a, ytmusic-player-bar .subtitle a, ytmusic-player-bar .byline a'
+        'ytm-slim-owner-renderer a, ytm-channel-name a, #owner-name a, ytd-channel-name a, ytmusic-player-bar .subtitle a, ytmusic-player-bar .byline a, ytmusic-player-page .subtitle a, ytmusic-player-page .byline a, ytmusic-player-bar .byline-link'
       );
       artist = (owner && owner.textContent) || '';
     }
@@ -422,6 +422,30 @@ export const BACKGROUND_SCRIPT = `
   // fresh instruction the moment a page loads.
   var lastCommand = readCommand();
 
+  function doNext() {
+    try {
+      var nextBtn = document.querySelector(
+        'ytmusic-player-bar .next-button, .next-button, button[aria-label*="Next" i], ytm-next-button, .ytp-next-button'
+      );
+      if (nextBtn) { nextBtn.click(); return; }
+      if (navigator.mediaSession && navigator.mediaSession._handlers && navigator.mediaSession._handlers.nexttrack) {
+        navigator.mediaSession._handlers.nexttrack();
+      }
+    } catch (e) {}
+  }
+
+  function doPrev() {
+    try {
+      var prevBtn = document.querySelector(
+        'ytmusic-player-bar .previous-button, .previous-button, button[aria-label*="Previous" i], ytm-prev-button, .ytp-prev-button'
+      );
+      if (prevBtn) { prevBtn.click(); return; }
+      if (navigator.mediaSession && navigator.mediaSession._handlers && navigator.mediaSession._handlers.previoustrack) {
+        navigator.mediaSession._handlers.previoustrack();
+      }
+    } catch (e) {}
+  }
+
   // "<verb>.<stamp>", or "seek.<seconds>.<stamp>" — dots throughout because a
   // cookie value may not carry a comma, a semicolon or a space, and the
   // seconds are rounded so none of the three parts can contain one either.
@@ -433,6 +457,8 @@ export const BACKGROUND_SCRIPT = `
     if (parts[0] === 'play') doPlay();
     else if (parts[0] === 'pause' || parts[0] === 'stop') doPause();
     else if (parts[0] === 'seek') doSeek(parseFloat(parts[1]));
+    else if (parts[0] === 'next') doNext();
+    else if (parts[0] === 'prev' || parts[0] === 'previous') doPrev();
   }
 
   setInterval(function () {
@@ -462,6 +488,8 @@ export const BACKGROUND_SCRIPT = `
     pause: doPause,
     stop: doPause,
     seek: doSeek,
+    next: doNext,
+    prev: doPrev,
     setBackground: function (value) {
       background = !!value;
       if (background) resume();
@@ -474,8 +502,8 @@ true;
 `;
 
 /** Commands the notification and lock screen can send back into the page. */
-export const mediaCommand = (name: 'play' | 'pause' | 'stop') =>
-  `window.__spoolMedia && window.__spoolMedia.${name}(); true;`;
+export const mediaCommand = (name: 'play' | 'pause' | 'stop' | 'next' | 'prev' | 'previous') =>
+  `window.__spoolMedia && window.__spoolMedia.${name === 'previous' ? 'prev' : name} ? window.__spoolMedia.${name === 'previous' ? 'prev' : name}() : true;`;
 
 /** The scrubber, which the card offers for a page as much as for a file. */
 export const seekCommand = (seconds: number) =>

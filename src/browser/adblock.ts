@@ -49,6 +49,15 @@ const COSMETIC_SELECTORS = [
   'ytmusic-ad-slot-renderer',
   'ytmusic-companion-ad-renderer',
   '.ytmusic-mealbar-promo-renderer',
+  'ytmusic-player-bar .advertisement',
+  'ytmusic-player[is-ad]',
+  '[is-ad]',
+  'ytmusic-pivot-bar-item-renderer[tab-id="SPunlimited"]',
+  '.ytmusic-popup-container:has(ytmusic-mealbar-promo-renderer)',
+  '.ytmusic-popup-container:has(ytmusic-upsell-dialog-renderer)',
+  'tp-yt-paper-dialog:has(ytmusic-upsell-dialog-renderer)',
+  'tp-yt-paper-dialog:has(ytmusic-mealbar-promo-renderer)',
+  'tp-yt-paper-dialog:has(ytmusic-general-offer-dialog-renderer)',
 ].join(',');
 
 export const ADBLOCK_SCRIPT = `
@@ -134,14 +143,34 @@ export const ADBLOCK_SCRIPT = `
     try {
       var skip = document.querySelector(
         '.ytp-ad-skip-button, .ytp-skip-ad-button, .ytp-ad-skip-button-modern'
+      ) || document.querySelector(
+        '.ytmusic-skip-ad-button, .ytmusic-ad-skip-button, button.ytp-ad-skip-button'
       );
       if (skip) skip.click();
 
-      var player = document.querySelector('.ad-showing');
+      // Dismiss any mealbars or dialog promos automatically
+      var promoDismiss = document.querySelector(
+        'ytmusic-mealbar-promo-renderer #dismiss-button, ytmusic-upsell-dialog-renderer #dismiss-button, tp-yt-paper-dialog #dismiss-button, ytmusic-mealbar-promo-renderer button[aria-label*="Dismiss" i]'
+      );
+      if (promoDismiss) promoDismiss.click();
+
+      // Clear any stuck backdrop if promo was present
+      var backdrop = document.querySelector('tp-yt-iron-overlay-backdrop.opened, iron-overlay-backdrop.opened');
+      var promoDialog = document.querySelector('ytmusic-upsell-dialog-renderer, ytmusic-mealbar-promo-renderer, ytmusic-general-offer-dialog-renderer');
+      if (backdrop && promoDialog) {
+        backdrop.remove();
+        promoDialog.remove();
+      }
+
+      var player = document.querySelector('.ad-showing') || document.querySelector('.ad-interrupting, ytmusic-player[is-ad], [is-ad]');
       if (player) {
         var video = player.querySelector('video') || document.querySelector('video');
-        if (video && isFinite(video.duration) && video.duration > 0) {
-          video.currentTime = video.duration;
+        if (video) {
+          video.muted = true;
+          video.playbackRate = 16.0;
+          if (isFinite(video.duration) && video.duration > 0) {
+            video.currentTime = video.duration;
+          }
         }
       }
     } catch (e) {}

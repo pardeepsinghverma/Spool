@@ -31,9 +31,7 @@ the contract every native call goes through; everything under
 | Parsing yt-dlp's manifest, or the format selector string | `src/core/ytdlp.ts` |
 | What a download is named on disk | `src/core/ytdlp.ts` (`partialKey`) |
 | PO token capture, or which video a token belongs to | `src/browser/potoken.ts`, `src/core/tokens.ts` |
-| Which quality a headless save picks | `src/browser/formatView.ts` |
-| The quality sheet's rows | `src/browser/formatView.ts` → `src/sheets/QualitySheet.tsx` |
-| Anything a tab does, any of the four download paths, the FAB | `src/browser/BrowserScreen.tsx` |
+| The two screens (Browse & Account), browser header, and mode switching | `src/browser/BrowserScreen.tsx` |
 | What the library index stores, or how the gallery is adopted | `src/core/storage.ts` |
 | The play counter and the replay rule's evidence | `src/browser/usePlayTracking.ts`, `src/core/plays.ts` |
 | What a row is *called* | `src/core/metadata.ts` |
