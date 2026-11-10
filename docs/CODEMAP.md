@@ -964,10 +964,12 @@ URL parsing and `NAV_SCRIPT`, the after-load reporter for SPA navigation.
 
 | Symbol | Signature | Meaning |
 |---|---|---|
-| `HOME_URL` | `'https://m.youtube.com'` — `:5` | |
-| `USER_AGENT` | Chrome 128 / Android 14 mobile UA — `:11` | |
-| `isYouTube(url)` | `(string) => boolean` — `:26` | Used only by `extractVideoId` and the tests. |
-| `extractVideoId(url)` | `(string) => string \| null` — `:36` | Handles `?v=`, `youtu.be/`, and `/shorts|embed|live|v/`. |
+| `HOME_URL` | `'https://m.youtube.com'` — `:5` | Standard YouTube mobile entry point |
+| `MUSIC_HOME_URL` | `'https://music.youtube.com'` — `:6` | YouTube Music mobile entry point |
+| `USER_AGENT` | Chrome 128 / Android 14 mobile UA — `:13` | |
+| `isYouTube(url)` | `(string) => boolean` — `:31` | Used only by `extractVideoId` and the tests. |
+| `isMusicUrl(url)` | `(string) => boolean` — `:8` | Identifies `music.youtube.com` for mode switching and audio defaulting. |
+| `extractVideoId(url)` | `(string) => string \| null` — `:41` | Handles `?v=`, `youtu.be/`, and `/shorts|embed|live|v/`. |
 | `isSignInPage(url)` | `(string) => boolean` | The Google hosts that ask for a password: `accounts`/`myaccount`/`signin` under `google.com` or `youtube.com`. Raises FLAG_SECURE, so it errs wide — a false positive blocks a screenshot, a false negative leaves a password field recordable. |
 | `hostOf(url)` | `(string) => string` | Host without `www.`. |
 | `NavMessage` | `{ type: 'nav'; url; title; theme: 'dark' \| 'light'; reason: string }` — `:50` | `theme` is measured from the page's own background luminance. |

@@ -77,8 +77,8 @@ Detail for every one of these lives in
 [`docs/FEATURES.md`](docs/FEATURES.md), whose sections the `§` marks below refer
 to. This list is a map, not documentation.
 
-- **Browse** — YouTube in a real WebView, with three-layer ad blocking and SPA
-  navigation tracking. `§ 1`
+- **Browse** — YouTube and YouTube Music in a real WebView with a 1-tap mode switcher, three-layer ad blocking, and SPA
+  navigation tracking. Audio-prioritized downloads on YT Music. `§ 1`
 - **Download** — tap the FAB and it commits to whatever one-tap is set to
   (`audio` by default); hold it three seconds for the quality sheet. Any rung
   YouTube offers, or audio extracted to `.m4a`. `§ 2`

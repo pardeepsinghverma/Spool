@@ -30,16 +30,28 @@ it before back leaves the tab.
 
 **Where:** `browser/BrowserScreen.tsx`, `browser/youtube.ts`, `browser/adblock.ts`
 
-A `react-native-webview` on `https://m.youtube.com`, presenting a plain Chrome
+A `react-native-webview` supporting both **Standard YouTube** (`https://m.youtube.com`) and **YouTube Music** (`https://music.youtube.com`), presenting a plain Chrome
 user agent — Android's stock WebView UA contains `; wv`, which Google rejects on
 its sign-in flows.
+
+### Dual-mode browser (YouTube + YT Music)
+
+The Browse screen features a discreet, native header with a segmented mode switcher:
+- **`[ YouTube | YT Music ]` Switcher:** Allows 1-tap switching between standard YouTube and YouTube Music. The active pill dynamically tracks the loaded URL (`isMusicUrl`) so it stays accurate whether the user navigated via button, in-page link, or redirect.
+- **Back Navigation (`←`):** Appears conditionally whenever `canGoBack` is true, allowing effortless back navigation in web history without solely relying on Android hardware back gestures.
+- **Reload (`↻`):** Direct refresh button to restart or recover stuck pages.
+- **Progress Track:** A 2dp accent loading bar rendered immediately below the header while a page is loading (`loadProgress !== null`).
+
+### YouTube Music specifics
+
+- **Audio-first Instant Downloads:** On `music.youtube.com`, tapping the floating action button (FAB) automatically defaults to the best available audio format (Opus / M4A) according to the user's audio quality settings, bypassing video format selection.
+- **Unified Sign-in & Cookies:** Both `m.youtube.com` and `music.youtube.com` share the `.youtube.com` cookie jar, so signing in once keeps the user's playlists, likes, and library active across both modes.
+- **Cosmetic Promo Suppression:** YouTube Music's mobile upsell mealbars (`ytmusic-mealbar-promo-renderer`, "Try Music Premium", "Open in app" prompts) are hidden alongside regular YouTube ad components.
+- **Metadata Extraction:** `BACKGROUND_SCRIPT` reads `ytmusic-player-bar` subtitles and track titles, correctly attributing music tracks, artists, and album tags.
 
 - `thirdPartyCookiesEnabled`, `domStorageEnabled`, `mediaPlaybackRequiresUserAction={false}`,
   `allowsFullscreenVideo`, `setSupportMultipleWindows={false}`.
 - Non-`http(s)` navigation is refused outright by `onShouldStartLoadWithRequest`.
-- The app draws exactly one control over the page: the FAB. No floating bubble,
-  no chrome bar. That restraint is the product's whole differentiator from
-  Vidmate/Snaptube/TubeMate.
 
 ### SPA navigation
 

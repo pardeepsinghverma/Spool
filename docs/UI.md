@@ -178,9 +178,9 @@ claim a capability in one place and deny it in another.
 ("Search YouTube for X"), never an automatic second query. Off-artwork screens
 stay on the neutral base.
 
-**Browse** — the site's own page, full bleed, our layout nowhere. On a feed the
+**Browse** — the site's own page, supported across both standard YouTube and YouTube Music. A minimalist top header provides a segmented `[ YouTube | YT Music ]` switcher, back button when history exists, reload control, and a thin loading bar. On a feed the
 FAB sits inert at `line` colour. On a watch page it wakes: filled, tinted,
-pulsing three times. That state change is the only notice that something can be
+pulsing three times. On YouTube Music, instant downloads automatically prioritize Audio format. That state change is the only notice that something can be
 kept.
 
 **Tap and hold do different things.** A tap commits: it downloads whatever

@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { extractVideoId, isYouTube, hostOf, isSignInPage } from '../src/browser/youtube.ts';
+import { extractVideoId, isYouTube, isMusicUrl, hostOf, isSignInPage } from '../src/browser/youtube.ts';
 
 /**
  * `extractVideoId` decides two things that are easy to get wrong and expensive
@@ -47,6 +47,37 @@ describe('isYouTube', () => {
     }
     assert.equal(isYouTube(undefined), false);
     assert.equal(isYouTube(null), false);
+  });
+});
+
+describe('isMusicUrl', () => {
+  test('identifies music.youtube.com URLs accurately', () => {
+    for (const url of [
+      'https://music.youtube.com',
+      'https://music.youtube.com/',
+      'https://music.youtube.com/watch?v=dQw4w9WgXcQ',
+      'https://music.youtube.com/playlist?list=PL123',
+      'https://music.youtube.com/explore',
+      'HTTPS://MUSIC.YOUTUBE.COM/watch?v=dQw4w9WgXcQ',
+    ]) {
+      assert.equal(isMusicUrl(url), true, url);
+    }
+  });
+
+  test('rejects standard YouTube and malicious host variants', () => {
+    for (const url of [
+      'https://m.youtube.com',
+      'https://www.youtube.com',
+      'https://youtu.be/dQw4w9WgXcQ',
+      'https://music.youtube.com.evil.com',
+      'https://evilmusic.youtube.com',
+      'https://not-music.youtube.com',
+      '',
+      null,
+      undefined,
+    ]) {
+      assert.equal(isMusicUrl(url), false, String(url));
+    }
   });
 });
 

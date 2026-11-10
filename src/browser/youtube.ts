@@ -3,6 +3,11 @@
  */
 
 export const HOME_URL = 'https://m.youtube.com';
+export const MUSIC_HOME_URL = 'https://music.youtube.com';
+
+export function isMusicUrl(url: string | null | undefined): boolean {
+  return /^https?:\/\/music\.youtube\.com(?:[/?#]|$)/i.test(url ?? '');
+}
 
 /**
  * Android's stock WebView UA contains "; wv", which Google rejects on its
@@ -128,7 +133,7 @@ export const NAV_SCRIPT = `
       var payload = JSON.stringify({
         type: 'nav',
         url: location.href,
-        title: (document.title || '').replace(/\\s*-\\s*YouTube\\s*$/, '').trim(),
+        title: (document.title || '').replace(/\\s*-\\s*YouTube(?:\\s*Music)?\\s*$/i, '').trim(),
         theme: pageTheme(),
         reason: reason
       });

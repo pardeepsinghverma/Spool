@@ -131,10 +131,12 @@ import {
 import { POTOKEN_SCRIPT, type PoTokenMessage } from './potoken';
 import {
   HOME_URL,
+  MUSIC_HOME_URL,
   NAV_SCRIPT,
   USER_AGENT,
   extractVideoId,
   hostOf,
+  isMusicUrl,
   isSignInPage,
   type FullscreenMessage,
   type NavMessage,
@@ -604,6 +606,7 @@ export function BrowserScreen() {
   } = usePlayTracking(onPlayCounted);
 
   const videoId = useMemo(() => extractVideoId(url), [url]);
+  const isMusic = useMemo(() => isMusicUrl(url), [url]);
 
   const later = useCallback((fn: () => void, ms: number) => {
     timers.current.push(setTimeout(fn, ms));
@@ -1774,8 +1777,10 @@ export function BrowserScreen() {
       }
 
       const settings = settingsRef.current;
+      const onMusic = isMusicUrl(url);
+      const wantAudio = onMusic || settings.instant === 'audio';
       const format =
-        settings.instant === 'audio'
+        wantAudio
           ? bestAudio(info.formats, kbpsFromQuality(settings.audioQuality))
           : bestVideo(info.formats, heightFromQuality(settings.videoQuality));
 
@@ -2591,6 +2596,114 @@ export function BrowserScreen() {
       edges={isFullscreen ? [] : ['top', 'bottom']}
     >
       <View style={styles.page}>
+        {/* Browser header with YouTube / YouTube Music switcher and controls */}
+        {screen === 'browse' && !isFullscreen && (
+          <View
+            style={[
+              styles.browserHeader,
+              { backgroundColor: t.chrome, borderBottomColor: fixed.line },
+            ]}
+          >
+            {canGoBack ? (
+              <Pressable
+                onPress={() => webview.current?.goBack()}
+                accessibilityRole="button"
+                accessibilityLabel="Go back"
+                style={({ pressed }) => [styles.navIconButton, pressed && { opacity: 0.6 }]}
+              >
+                <MaterialIcons name="arrow-back" size={20} color={t.on} />
+              </Pressable>
+            ) : (
+              <View style={styles.navIconPlaceholder} />
+            )}
+
+            <View style={[styles.modeSwitcher, { backgroundColor: t.surface }]}>
+              <Pressable
+                onPress={() => {
+                  if (isMusic) {
+                    webview.current?.injectJavaScript(`window.location.href = '${HOME_URL}'; true;`);
+                  }
+                }}
+                accessibilityRole="tab"
+                accessibilityState={{ selected: !isMusic }}
+                accessibilityLabel="YouTube mode"
+                style={[
+                  styles.modeTab,
+                  !isMusic && [styles.modeTabActive, { backgroundColor: t.accent }],
+                ]}
+              >
+                <MaterialIcons
+                  name="smart-display"
+                  size={15}
+                  color={!isMusic ? t.onAccent : t.onDim}
+                />
+                <Text
+                  style={[
+                    styles.modeTabText,
+                    { color: !isMusic ? t.onAccent : t.onDim },
+                    !isMusic && styles.modeTabTextActive,
+                  ]}
+                >
+                  YouTube
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => {
+                  if (!isMusic) {
+                    webview.current?.injectJavaScript(`window.location.href = '${MUSIC_HOME_URL}'; true;`);
+                  }
+                }}
+                accessibilityRole="tab"
+                accessibilityState={{ selected: isMusic }}
+                accessibilityLabel="YouTube Music mode"
+                style={[
+                  styles.modeTab,
+                  isMusic && [styles.modeTabActive, { backgroundColor: t.accent }],
+                ]}
+              >
+                <MaterialIcons
+                  name="music-note"
+                  size={15}
+                  color={isMusic ? t.onAccent : t.onDim}
+                />
+                <Text
+                  style={[
+                    styles.modeTabText,
+                    { color: isMusic ? t.onAccent : t.onDim },
+                    isMusic && styles.modeTabTextActive,
+                  ]}
+                >
+                  YT Music
+                </Text>
+              </Pressable>
+            </View>
+
+            <Pressable
+              onPress={() => webview.current?.reload()}
+              accessibilityRole="button"
+              accessibilityLabel="Reload page"
+              style={({ pressed }) => [styles.navIconButton, pressed && { opacity: 0.6 }]}
+            >
+              <MaterialIcons name="refresh" size={20} color={t.onDim} />
+            </Pressable>
+          </View>
+        )}
+
+        {screen === 'browse' && !isFullscreen && loadProgress !== null && (
+          <View style={[styles.loadProgressTrack, { backgroundColor: t.surface }]}>
+            <View
+              style={[
+                styles.loadProgressBar,
+                {
+                  backgroundColor: t.accent,
+                  width: `${Math.round(loadProgress * 100)}%`,
+                },
+              ]}
+            />
+          </View>
+        )}
+
         {/* Never unmounted — leaving Downloads must not cost a page reload. */}
         <WebView
           // Changes only when the renderer has been killed, which is the one
@@ -3524,6 +3637,61 @@ async function requestMediaPermissions() {
 const styles = StyleSheet.create({
   root: { flex: 1 },
   page: { flex: 1, overflow: 'hidden' },
+  browserHeader: {
+    height: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  modeSwitcher: {
+    flexDirection: 'row',
+    borderRadius: 20,
+    padding: 3,
+  },
+  modeTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 16,
+  },
+  modeTabActive: {
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.15,
+    shadowRadius: 1,
+    elevation: 1,
+  },
+  modeTabText: {
+    fontSize: 12,
+    fontWeight: '500',
+    letterSpacing: 0.2,
+  },
+  modeTabTextActive: {
+    fontWeight: '700',
+  },
+  navIconButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navIconPlaceholder: {
+    width: 34,
+    height: 34,
+  },
+  loadProgressTrack: {
+    height: 2,
+    width: '100%',
+    overflow: 'hidden',
+  },
+  loadProgressBar: {
+    height: '100%',
+  },
   fabSlot: {
     position: 'absolute',
     right: space.gutter,

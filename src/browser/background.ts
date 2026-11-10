@@ -291,7 +291,7 @@ export const BACKGROUND_SCRIPT = `
 
     // The page's own media metadata is the accurate answer; <title> is what is
     // left when YouTube has not set one yet.
-    var title = (m && m.title) || (document.title || '').replace(/\\s*-\\s*YouTube\\s*$/, '');
+    var title = (m && m.title) || (document.title || '').replace(/\\s*-\\s*YouTube(?:\\s*Music)?\\s*$/i, '');
     var artist = (m && m.artist) || '';
 
     // A real mediaSession artist is YouTube saying "this is a track", not just
@@ -302,7 +302,7 @@ export const BACKGROUND_SCRIPT = `
 
     if (!artist) {
       var owner = document.querySelector(
-        'ytm-slim-owner-renderer a, ytm-channel-name a, #owner-name a, ytd-channel-name a'
+        'ytm-slim-owner-renderer a, ytm-channel-name a, #owner-name a, ytd-channel-name a, ytmusic-player-bar .subtitle a, ytmusic-player-bar .byline a'
       );
       artist = (owner && owner.textContent) || '';
     }

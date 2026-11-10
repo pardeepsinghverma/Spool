@@ -79,8 +79,10 @@ flowchart TD
 The main interface (`src/shell/TabBar.tsx`) is structured logically from local storage on the left, to the web in the middle, to user identity on the right:
 1. **Home**: Quick resume for recent listens, smart recommendations computed locally based on listening history, and jump-back playlists.
 2. **Search**: Instant dual search across both your local offline library and online YouTube queries without switching apps.
-3. **Browse**: The core web engine. Runs `m.youtube.com` inside a stripped-down `react-native-webview`. 
-   - Uses a standard desktop Chrome User Agent so Google accounts function without webview blocks.
+3. **Browse**: The core web engine. Runs both standard YouTube (`m.youtube.com`) and **YouTube Music** (`music.youtube.com`) inside a stripped-down `react-native-webview`. 
+   - Segmented `[ YouTube | YT Music ]` header switcher for 1-tap toggling between regular video feeds and specialized music streaming.
+   - On YouTube Music, instant downloads automatically prioritize pure high-quality Audio (Opus/M4A).
+   - Uses a standard desktop Chrome User Agent so Google accounts and YouTube Music libraries function without webview blocks.
    - Injects custom JS (`NAV_SCRIPT`, `ADBLOCK_SCRIPT`, `POTOKEN_SCRIPT`).
    - Presents a clean, single Floating Action Button (FAB) that lights up when a downloadable media stream is detected.
 4. **Library**: Your complete collection. Tracks, albums, artists, custom playlists, and automatic categorization between Audio and Video files.

@@ -41,6 +41,14 @@ const COSMETIC_SELECTORS = [
   '.ytp-ad-module',
   '.ytp-ad-overlay-container',
   '.ytp-ad-image-overlay',
+  // YouTube Music mobile promos, mealbars and upsells
+  'ytmusic-mealbar-promo-renderer',
+  'ytmusic-upsell-dialog-renderer',
+  'ytmusic-general-offer-dialog-renderer',
+  'ytmusic-banner-promo-renderer',
+  'ytmusic-ad-slot-renderer',
+  'ytmusic-companion-ad-renderer',
+  '.ytmusic-mealbar-promo-renderer',
 ].join(',');
 
 export const ADBLOCK_SCRIPT = `
