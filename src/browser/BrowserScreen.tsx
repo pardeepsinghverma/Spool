@@ -481,7 +481,13 @@ export function BrowserScreen() {
             setLoadProgress(nativeEvent.progress < 1 ? nativeEvent.progress : null)
           }
           onLoadEnd={() => setLoadProgress(null)}
-          onShouldStartLoadWithRequest={(request) => /^https?:/i.test(request.url)}
+          onShouldStartLoadWithRequest={(request) => {
+            if (!/^https?:/i.test(request.url)) return false;
+            if (isSignInPage(request.url)) {
+              setSecureWindow(true);
+            }
+            return true;
+          }}
           allowsBackForwardNavigationGestures
           mediaPlaybackRequiresUserAction={false}
           allowsFullscreenVideo
@@ -494,7 +500,6 @@ export function BrowserScreen() {
           mixedContentMode="never"
           saveFormDataDisabled
           geolocationEnabled={false}
-          dataDetectorTypes="none"
           setSupportMultipleWindows={false}
           style={{ flex: 1, backgroundColor: t.pageBg }}
         />
@@ -607,11 +612,21 @@ export function BrowserScreen() {
 
       {preRelease && !appLocked && <PreReleaseSheet onClose={() => setPreRelease(false)} />}
       {playNotice && <PlayLockSheet notice={playNotice} />}
-      {paywallOpen && <SubscribeSheet onClose={() => setPaywallOpen(false)} />}
+      {paywallOpen && (
+        <SubscribeSheet
+          onClose={() => {
+            setPaywallOpen(false);
+            void syncLicence({ force: true });
+          }}
+        />
+      )}
       {accountIntent && (
         <AccountSheet
           intent={accountIntent}
-          onClose={() => setAccountIntent(null)}
+          onClose={() => {
+            setAccountIntent(null);
+            void syncLicence({ force: true });
+          }}
         />
       )}
     </SafeAreaView>

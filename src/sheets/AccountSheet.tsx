@@ -25,7 +25,7 @@ import {
   register,
   useAccount,
 } from '../core/account';
-import { openPaywall, syncLicence } from '../core/license';
+import { licence, openPaywall, syncLicence } from '../core/license';
 import { formatDate, supportWhatsapp, whatsappUrl } from '../core/payments';
 
 /**
@@ -102,10 +102,12 @@ export function AccountSheet({ intent, onClose }: { intent: AccountIntent; onClo
     setPassword('');
     // An account that has already paid should not have to wait for the next
     // launch to be one on this phone.
-    void syncLicence({ force: true });
+    await syncLicence({ force: true });
     if (intent.next === 'paywall') {
       onClose();
       openPaywall(intent.reason);
+    } else if (licence().entitled) {
+      onClose();
     }
   };
 

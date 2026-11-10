@@ -589,7 +589,15 @@ export const signOutOfYouTube = () => YtDlp.signOutOfYouTube();
  * The flag is per-window, not per-view, so leaving it on would quietly stop the
  * user screenshotting their own library.
  */
-export const setSecureWindow = (on: boolean) => YtDlp.setSecureWindow(on);
+export const setSecureWindow = (on: boolean) => {
+  try {
+    if (typeof YtDlp?.setSecureWindow === 'function') {
+      YtDlp.setSecureWindow(on);
+    }
+  } catch (err) {
+    log.warn('security', `Failed to set secure window to ${on}`, { error: String(err) });
+  }
+};
 
 /**
  * Sets screen orientation ('landscape', 'portrait', or 'unspecified') for fullscreen video playback.

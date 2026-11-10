@@ -228,6 +228,9 @@ export async function syncLicence({ force = false } = {}): Promise<boolean> {
     // half-finished migration all produce this answer, and all of them resolve
     // themselves; deleting a working licence does not.
     log.info('licence', 'server reports no active subscription');
+    // If not entitled, don't lock out sync for 6 hours; allow checking again after a brief gap (15s)
+    // so newly approved payments or subscriptions sync promptly when the user foregrounds or closes sheets.
+    nextSyncAt = now + 15 * 1000;
     return false;
   }
 
