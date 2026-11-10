@@ -1,3 +1,8 @@
+// First, and it has to stay first: this installs the crash captures and the
+// console bridge as a side effect of being imported. Imports are evaluated in
+// source order, so anything above this line runs unwatched. See bootstrap.ts.
+import './src/core/bootstrap';
+
 import { registerRootComponent } from 'expo';
 
 import App from './App';

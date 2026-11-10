@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { extractVideoId, isYouTube, hostOf } from '../src/browser/youtube.ts';
+import { extractVideoId, isYouTube, hostOf, isSignInPage } from '../src/browser/youtube.ts';
 
 /**
  * `extractVideoId` decides two things that are easy to get wrong and expensive
@@ -100,5 +100,57 @@ describe('hostOf', () => {
     assert.equal(hostOf('not a url'), 'not a url');
     assert.equal(hostOf(''), '');
     assert.equal(hostOf(null), '');
+  });
+});
+
+/**
+ * `isSignInPage` is what raises FLAG_SECURE, so it is the difference between a
+ * password field that cannot be screen-recorded and one that can. It fails in
+ * two directions and they do not cost the same: a false positive blocks a
+ * screenshot the user wanted, a false negative leaves a credential capturable.
+ */
+describe('isSignInPage', () => {
+  test('matches the Google hosts that ask for a password', () => {
+    for (const url of [
+      'https://accounts.google.com/',
+      'https://accounts.google.com/v3/signin/identifier?flowName=GlifWebSignIn',
+      'https://accounts.youtube.com/accounts/SetSID',
+      'https://myaccount.google.com/security',
+      'https://signin.google.com/',
+      'HTTPS://ACCOUNTS.GOOGLE.COM/signin',
+      'http://accounts.google.com',
+    ]) {
+      assert.equal(isSignInPage(url), true, url);
+    }
+  });
+
+  test('leaves ordinary browsing alone', () => {
+    for (const url of [
+      'https://m.youtube.com',
+      'https://m.youtube.com/watch?v=dQw4w9WgXcQ',
+      'https://www.google.com/search?q=x',
+      'https://music.youtube.com/',
+      '',
+      null,
+    ]) {
+      assert.equal(isSignInPage(url), false, String(url));
+    }
+  });
+
+  /**
+   * The same lookalike trap `isYouTube` guards against, and it matters more
+   * here in reverse: a page that only *looks* like the sign-in host must not
+   * be trusted to be one, but neither should it silently get the flag and make
+   * the app feel broken on a page nobody expects.
+   */
+  test('is not fooled by a lookalike host', () => {
+    for (const url of [
+      'https://accounts.google.com.evil.com/signin',
+      'https://evil.com/accounts.google.com',
+      'https://notaccounts.google.com/',
+      'https://accounts.google.co/',
+    ]) {
+      assert.equal(isSignInPage(url), false, url);
+    }
   });
 });

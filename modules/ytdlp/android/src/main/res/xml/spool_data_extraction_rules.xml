@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (dataExtractionRules). Same intent as spool_backup_rules.xml, which
+  covers Android 11 and older; keep the two in step.
+
+  This format splits what the older one did not: cloud-backup is Google's servers,
+  device-transfer is a phone-to-phone copy during setup. The WebView's cookie jar
+  is the user's YouTube login, so it is excluded from both — a device transfer is
+  a shorter journey than a cloud backup but it is still the credential leaving the
+  phone it was granted on.
+-->
+<data-extraction-rules>
+  <cloud-backup>
+    <exclude domain="root" path="app_webview" />
+    <exclude domain="sharedpref" path="spool_trial.xml" />
+  </cloud-backup>
+  <device-transfer>
+    <exclude domain="root" path="app_webview" />
+    <exclude domain="sharedpref" path="spool_trial.xml" />
+  </device-transfer>
+</data-extraction-rules>

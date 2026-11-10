@@ -93,10 +93,31 @@ export function bestAudio(formats: Format[], maxKbps = Infinity): Format | undef
   const audio = formats
     .filter((f) => f.kind === 'audio')
     .sort((a, b) => (b.kbps ?? 0) - (a.kbps ?? 0));
-  if (!audio.length) return undefined;
-  // Rungs with no reported bitrate are not evidence of being small, so they are
-  // only reached once nothing measurable fits.
-  return audio.find((f) => f.kbps != null && f.kbps <= maxKbps) ?? audio[audio.length - 1];
+
+  if (audio.length) {
+    // Rungs with no reported bitrate are not evidence of being small, so they
+    // are only reached once nothing measurable fits.
+    return audio.find((f) => f.kbps != null && f.kbps <= maxKbps) ?? audio[audio.length - 1];
+  }
+
+  // No audio-only stream in this manifest — which is not the same as no audio.
+  //
+  // A degraded manifest (one client, no PO token) can come back holding nothing
+  // but a muxed 360p, and `kind` calls anything carrying video a video. Read
+  // literally that means "this page has no audio", and the callers above act on
+  // it: the replay rule returned without a word and the FAB said the page had
+  // no downloadable media, on a music video that plainly has some.
+  //
+  // The audio is there, wrapped in a container with a video track beside it,
+  // and `-x` unwraps it with the bundled ffmpeg exactly as it does for a
+  // separate stream. Smallest first: every muxed rung carries the same audio,
+  // so a taller one only costs bandwidth for a video track about to be thrown
+  // away. This is what the paragraph above is for — falling back beats
+  // returning nothing.
+  const muxed = formats
+    .filter((f) => f.muxed)
+    .sort((a, b) => (a.size ?? Infinity) - (b.size ?? Infinity));
+  return muxed[0];
 }
 
 /**

@@ -1,5 +1,6 @@
 import YtDlp, { onPlaybackCommand, type NowPlaying, type PlaybackCommandEvent } from '../../modules/ytdlp';
 import type { EventSubscription } from 'expo-modules-core';
+import * as log from '../core/log';
 
 /**
  * One media notification, two things that can fill it.
@@ -43,6 +44,27 @@ const positions: Record<Source, { at: number; clock: number; playing: boolean }>
  * over what buffering costs.
  */
 const DRIFT_SECONDS = 2;
+
+/**
+ * When the last attempt to reach the notification was refused, or 0.
+ *
+ * A refusal is retried, but not on every tick. Refused means the app is off
+ * screen with no service running — or battery-restricted, which Android
+ * enforces the same way — and a retry there is refused identically. Measured
+ * on the S21 FE: two refused `startForegroundService` calls a second, each a
+ * binder call and a system warning, for as long as the screen stayed off.
+ */
+let refusedAt = 0;
+const RETRY_REFUSED_MS = 15_000;
+
+/** Never throws: an older native module has no such function. */
+function backgroundRestricted(): boolean | null {
+  try {
+    return YtDlp.backgroundRestricted();
+  } catch {
+    return null;
+  }
+}
 
 /** Everything except the playhead, which moves on its own. */
 const shapeOf = (state: NowPlaying) =>
@@ -91,10 +113,43 @@ export function publishNowPlaying(source: Source, state: NowPlaying): void {
     if (Math.abs(state.position - expected) < DRIFT_SECONDS) return;
   }
 
+  /**
+   * Caught here, once, rather than at each caller — the local player calls
+   * this from inside engine status listeners, where a throw is a fatal JS
+   * error that ends the app.
+   *
+   * The throw is real and expected: Android 12+ refuses to *start* a
+   * foreground service from a backgrounded process, and says so from the call.
+   * Playback carries on either way. Nothing is recorded as published, so the
+   * next tick asks again rather than believing a card it never drew — which is
+   * also what lets it succeed the moment the app is back on screen.
+   */
+  // A new track is worth one immediate try; the same one waits out the backoff.
+  if (refusedAt && shape === mine && Date.now() - refusedAt < RETRY_REFUSED_MS) return;
+
+  try {
+    YtDlp.setNowPlaying(state);
+  } catch (e) {
+    // Once per run of refusals, so the retries cannot evict the history that
+    // explains them. `restricted` is the usual reason on a phone where this
+    // keeps happening, and the one the user can do something about.
+    if (!refusedAt) {
+      log.warn('player', 'notification refused', {
+        source,
+        restricted: backgroundRestricted(),
+        ...log.describe(e),
+      });
+    }
+    refusedAt = Date.now();
+    // Remembered so the backoff above can tell a retry of this track from a
+    // new one, without claiming the card was drawn.
+    published[source] = shape;
+    return;
+  }
+  refusedAt = 0;
   owner = source;
   published[source] = shape;
   positions[source] = { at: state.position, clock: Date.now(), playing: state.playing };
-  YtDlp.setNowPlaying(state);
 }
 
 /**

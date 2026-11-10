@@ -40,6 +40,31 @@ def builtAt = System.currentTimeMillis()
 def signingSha = project.findProperty('SPOOL_SIGNING_SHA256')
   ?: '6A836D549AF7FEC349484FB625D11E77C678D6C2433736B16E0346BEB722F278'
 
+/**
+ * The public half of the licence signing key, and where to ask for a licence.
+ *
+ * Neither is a secret. The key is public by construction and the URL is in
+ * every packet the app sends; both live in the tree because a public key kept
+ * in a private file is a public key that eventually gets lost, and losing it
+ * invalidates every licence ever issued.
+ *
+ * Generate the pair once with `php tools/keygen.php` on the licence server —
+ * server/README.md says where that server lives. It prints the private half to
+ * paste into that server's config.php, and the public half to pass here.
+ *
+ * The production server is https://spool.pardeep.app (admin panel at /admin).
+ * It must be https: a release build denies
+ * cleartext, and `syncLicence` reads a refused request as "no news", so an
+ * http:// URL here produces a server that never sees a request and an app that
+ * reports nothing wrong.
+ *
+ *   ./gradlew :app:assembleRelease \
+ *     -PSPOOL_LICENCE_KEY=<public key> \
+ *     -PSPOOL_LICENCE_SERVER=https://spool.pardeep.app
+ */
+def licenceKey = project.findProperty('SPOOL_LICENCE_KEY') ?: ''
+def licenceServer = project.findProperty('SPOOL_LICENCE_SERVER') ?: ''
+
 android {
   namespace 'com.afinitycode.spool.ytdlp'
   compileSdk 36
@@ -54,11 +79,19 @@ android {
 
     buildConfigField 'boolean', 'TRIAL', "${trialOn}"
     buildConfigField 'long', 'BUILT_AT', "${builtAt}L"
+    buildConfigField 'long', 'TRIAL_DAYS', "${trialDays}L"
     buildConfigField 'long', 'TRIAL_EXPIRES_AT', "${builtAt + trialDays * 24 * 60 * 60 * 1000}L"
     buildConfigField 'int', 'TRIAL_MAX_DOWNLOADS', "${trialMaxSaves}"
     buildConfigField 'int', 'TRIAL_MAX_SECONDS', "${trialMaxSeconds}"
     // Overridden for release below; empty here so debug builds do not pin.
     buildConfigField 'String', 'SIGNING_SHA256', '""'
+
+    // An empty key fails closed: LicenseGuard cannot construct a verifier, every
+    // token fails to verify, and nobody is entitled. That is the right way round
+    // for a debug build, and the release variant below refuses to be built that
+    // way at all rather than shipping a paywall nobody can get past.
+    buildConfigField 'String', 'LICENCE_KEY', "\"${licenceKey}\""
+    buildConfigField 'String', 'LICENCE_SERVER', "\"${licenceServer}\""
     // Declares the ABIs this module supports. Note this does NOT keep the
     // youtubedl-android AAR's per-ABI Python and ffmpeg payloads out of the
     // final APK — abiFilters constrains this module's own native compilation,
@@ -96,6 +129,33 @@ android {
   }
 }
 
+
+/**
+ * A release build with no licence key would install, run, take payments and then
+ * refuse every licence it was handed — a failure invisible until a real person
+ * has paid real money, which is the worst possible moment to discover it. Fail
+ * at configuration time instead.
+ *
+ * At the top level rather than inside `android { }` on purpose: the closure needs
+ * `gradle` off the Project, and resolving it through the android extension's
+ * delegate works only by Groovy's owner fallback. This is not a place to rely on
+ * that.
+ *
+ * Deliberately not applied to debug. Local builds have no server and no key, and
+ * refusing there would break every `expo run:android`; they fail closed instead —
+ * no verifier, nobody entitled, the trial applies.
+ */
+gradle.taskGraph.whenReady { graph ->
+  def releasing = graph.allTasks.any { it.name.toLowerCase().contains('release') }
+  if (releasing && (licenceKey.isEmpty() || licenceServer.isEmpty())) {
+    throw new GradleException(
+      'Release builds need a licence key and server. Run `php tools/keygen.php`, ' +
+        'paste the public key into SPOOL_LICENCE_KEY, ' +
+        'and pass -PSPOOL_LICENCE_SERVER=https://spool.pardeep.app. See server/README.md.',
+    )
+  }
+}
+
 repositories {
   mavenCentral()
   google()
@@ -121,4 +181,12 @@ dependencies {
   // that surfaces derive from the artwork, and pixels are not reachable from
   // JavaScript — this is the platform's own answer to exactly that problem.
   implementation 'androidx.palette:palette-ktx:1.0.0'
+
+  // On-device OCR of payment screenshots (`recognizeText`). The *bundled*
+  // artifact, not `play-services-mlkit-text-recognition`: that one downloads
+  // its model through Play services on first use, and a sideloaded app cannot
+  // assume Play services is there, current, or willing — the moment a user has
+  // just paid is the worst time to find out. Costs a few MB per ABI. 16.0.1 is
+  // the latest on Google's Maven as of this change.
+  implementation 'com.google.mlkit:text-recognition:16.0.1'
 }

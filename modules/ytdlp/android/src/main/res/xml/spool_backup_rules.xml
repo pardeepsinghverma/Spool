@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 and older (fullBackupContent). The Android 12+ rules are in
+  spool_data_extraction_rules.xml and must be kept saying the same thing.
+
+  Auto Backup is on — the Expo template sets android:allowBackup="true" — and it
+  excludes only cache/, code_cache/ and no_backup/ by default. Everything else
+  under the data directory goes to Google's servers and comes back on any device
+  the user restores to.
+
+  For most of this app that is a feature: the library index in databases/ is
+  worth carrying to a new phone. For two directories it is not.
+
+  * app_webview/ is where the WebView keeps its cookie jar, which after a sign-in
+    holds the user's live YouTube session. Backing that up uploads the login and
+    restores it onto another device — a copy of the credential leaving the phone
+    entirely, with no one deciding it should. Excluded outright.
+
+  * spool_trial.xml is the trial's save counter. A backup taken at zero saves and
+    restored later would set it back to zero, so leaving it in makes the cloud a
+    reset button. (The externalMediaDirs mirror would still catch it, since it is
+    outside the data directory and survives more than this does — but the two
+    should not disagree in the first place.)
+-->
+<full-backup-content>
+  <exclude domain="root" path="app_webview" />
+  <exclude domain="sharedpref" path="spool_trial.xml" />
+</full-backup-content>

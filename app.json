@@ -34,9 +34,17 @@
           }
         }
       ],
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ],
       "./plugins/withReleaseSigning",
       "./plugins/withAbiSplits",
-      "./plugins/withPageSizeCompat"
+      "./plugins/withPageSizeCompat",
+      "./plugins/withFullscreenOrientation"
     ]
   }
 }

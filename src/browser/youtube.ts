@@ -42,6 +42,26 @@ export function extractVideoId(url: string): string | null {
   return null;
 }
 
+/**
+ * The Google hosts that ask for a password.
+ *
+ * Signing in to YouTube always hands off to `accounts.google.com`, whatever
+ * locale the user is in — Google does not run the sign-in flow on a country
+ * domain — so an exact list is right rather than merely convenient. The other
+ * two are the pages a signed-in user reaches to change a password or manage the
+ * account, which show the same fields.
+ *
+ * Used to raise FLAG_SECURE, so the cost of being wrong is asymmetric: matching
+ * one host too many blocks a screenshot the user might have wanted, matching one
+ * too few leaves a password field screen-recordable. Err wide.
+ */
+const SIGN_IN_HOST =
+  /^https?:\/\/(?:accounts|myaccount|signin)\.(?:google|youtube)\.com(?:[/?#]|$)/i;
+
+export function isSignInPage(url: string): boolean {
+  return SIGN_IN_HOST.test(url ?? '');
+}
+
 export function hostOf(url: string): string {
   const match = (url ?? '').match(/^[a-z]+:\/\/([^/?#]+)/i);
   return match ? match[1].replace(/^www\./, '') : url ?? '';
@@ -54,6 +74,12 @@ export type NavMessage = {
   /** Derived from the page's own background luminance. */
   theme: 'dark' | 'light';
   reason: string;
+};
+
+export type FullscreenMessage = {
+  type: 'fullscreen';
+  isFullscreen: boolean;
+  orientation: 'landscape' | 'portrait';
 };
 
 /**
@@ -112,6 +138,77 @@ export const NAV_SCRIPT = `
     } catch (e) {}
   }
 
+  var lastFs = '';
+  function postFs(isFs, orient) {
+    var key = isFs ? ('1:' + orient) : '0';
+    if (key === lastFs) return;
+    lastFs = key;
+    try {
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'fullscreen',
+        isFullscreen: isFs,
+        orientation: orient
+      }));
+    } catch (e) {}
+  }
+
+  function reportFullscreen() {
+    try {
+      var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+      var v = (fsEl && fsEl.querySelector ? fsEl.querySelector('video') : null) || document.querySelector('video');
+      var isVideoFs = !!(v && (v.webkitDisplayingFullscreen || v.displayingFullscreen));
+      var player = document.querySelector('.html5-video-player, #movie_player, #player-control-overlay');
+      var isPlayerFs = !!(player && (player.classList.contains('ytp-fullscreen') || player.classList.contains('fullscreen') || player.classList.contains('player-fullscreen')));
+      var isFs = !!fsEl || isVideoFs || isPlayerFs;
+      var orient = 'landscape';
+      if (isFs && v && v.videoWidth && v.videoHeight && v.videoHeight > v.videoWidth) {
+        orient = 'portrait';
+      }
+      postFs(isFs, orient);
+    } catch (e) {}
+  }
+
+  if (window.screen && window.screen.orientation) {
+    var origLock = window.screen.orientation.lock;
+    window.screen.orientation.lock = function (orient) {
+      var target = (typeof orient === 'string' && orient.indexOf('portrait') !== -1) ? 'portrait' : 'landscape';
+      postFs(true, target);
+      if (typeof origLock === 'function') {
+        try { return origLock.call(window.screen.orientation, orient); } catch (e) {}
+      }
+      return Promise.resolve();
+    };
+    var origUnlock = window.screen.orientation.unlock;
+    window.screen.orientation.unlock = function () {
+      postFs(false, 'portrait');
+      if (typeof origUnlock === 'function') {
+        try { origUnlock.call(window.screen.orientation); } catch (e) {}
+      }
+    };
+  }
+
+  function attachVideoListeners() {
+    var videos = document.querySelectorAll('video');
+    for (var i = 0; i < videos.length; i++) {
+      var vid = videos[i];
+      if (!vid._spoolFs) {
+        vid._spoolFs = true;
+        vid.addEventListener('webkitbeginfullscreen', reportFullscreen);
+        vid.addEventListener('webkitendfullscreen', reportFullscreen);
+      }
+    }
+  }
+
+  document.addEventListener('click', function (e) {
+    var target = e.target;
+    var btn = target && target.closest ? target.closest('button.fullscreen-icon, button.ytp-fullscreen-button, button[aria-label*="ull screen" i], button[aria-label*="ullscreen" i], [data-title-no-tooltip*="ull screen" i]') : null;
+    if (btn) {
+      setTimeout(reportFullscreen, 50);
+      setTimeout(reportFullscreen, 300);
+      setTimeout(reportFullscreen, 800);
+    }
+  }, true);
+
   ['pushState', 'replaceState'].forEach(function (name) {
     var original = history[name];
     if (typeof original !== 'function') return;
@@ -124,6 +221,8 @@ export const NAV_SCRIPT = `
 
   window.addEventListener('popstate', function () { report('popstate'); });
   window.addEventListener('yt-navigate-finish', function () { report('yt-navigate'); });
+  document.addEventListener('fullscreenchange', reportFullscreen);
+  document.addEventListener('webkitfullscreenchange', reportFullscreen);
 
   var titleEl = document.querySelector('title');
   if (titleEl && window.MutationObserver) {
@@ -132,9 +231,15 @@ export const NAV_SCRIPT = `
     });
   }
 
-  setInterval(function () { report('poll'); }, 1000);
+  setInterval(function () {
+    report('poll');
+    attachVideoListeners();
+    reportFullscreen();
+  }, 1000);
 
+  attachVideoListeners();
   report('init');
+  reportFullscreen();
 })();
 true;
 `;

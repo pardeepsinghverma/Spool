@@ -52,6 +52,21 @@ type Props = {
   duplicateWarning?: string | null;
   emptyReason?: string;
   /**
+   * Why extraction failed, in the app's own words.
+   *
+   * Without this the sheet said "YouTube changed something" for every failure
+   * there is — and offered *Update engine* as the way out. With the network
+   * off, that is a wrong diagnosis attached to an action that cannot work and
+   * would itself fail for the same reason.
+   */
+  errorReason?: string | null;
+  /**
+   * Whether a stale extractor is a plausible cause. False for a failure the
+   * engine cannot be blamed for, which is what takes the update button away
+   * rather than leaving it there to be pressed uselessly.
+   */
+  errorStale?: boolean;
+  /**
    * What a single tap on the download button grabs. Shown here because this
    * sheet is what a hold opens, and the question "why did tapping give me
    * audio?" is only ever asked at the moment the alternatives are on screen.
@@ -81,6 +96,8 @@ export function QualitySheet({
   storageWarning,
   duplicateWarning,
   emptyReason,
+  errorReason,
+  errorStale,
   instant,
   onInstant,
   onPick,
@@ -138,7 +155,12 @@ export function QualitySheet({
             onCollapse={onCollapse}
           />
         ) : mode === 'error' ? (
-          <ExtractionFailed onUpdateEngine={onUpdateEngine} onRetry={onRetry} />
+          <ExtractionFailed
+            reason={errorReason}
+            stale={errorStale}
+            onUpdateEngine={onUpdateEngine}
+            onRetry={onRetry}
+          />
         ) : mode === 'empty' ? (
           <NothingHere reason={emptyReason} />
         ) : (
@@ -386,38 +408,60 @@ function AllFormats({
   );
 }
 
+/**
+ * Extraction failed, and the sheet says which failure it was.
+ *
+ * It used to say "YouTube changed something" unconditionally and offer
+ * *Update engine* first. That is right for perhaps one failure in four and
+ * actively misleading for the rest: measured with the network off, the app
+ * blamed YouTube for a change it had not made and offered an update that would
+ * have failed for exactly the same reason. `readableError` had already worked
+ * out the truth — the sheet simply never asked for it.
+ */
 function ExtractionFailed({
+  reason,
+  stale,
   onUpdateEngine,
   onRetry,
 }: {
+  reason?: string | null;
+  stale?: boolean;
   onUpdateEngine: () => void;
   onRetry: () => void;
 }) {
   const { t } = useTheme();
+  // Only claim YouTube moved when a stale extractor is actually a candidate.
+  const title = stale ? 'YouTube changed something' : 'Couldn’t read this page';
   return (
     <View style={styles.panel}>
       <View style={[styles.card, { backgroundColor: t.pageBg, borderColor: t.border }]}>
-        <MaterialIcons name="build" size={22} color={t.warn} />
-        <Text style={[styles.cardTitle, { color: t.text }]}>
-          YouTube changed something
-        </Text>
+        <MaterialIcons name={stale ? 'build' : 'error-outline'} size={22} color={t.warn} />
+        <Text style={[styles.cardTitle, { color: t.text }]}>{title}</Text>
         <Text style={[styles.cardBody, { color: t.textDim }]}>
-          The extraction engine couldn't read this page. An update may already fix it.
+          {reason ??
+            'The extraction engine couldn’t read this page. An update may already fix it.'}
         </Text>
         <View style={styles.cardActions}>
-          <Pressable
-            onPress={onUpdateEngine}
-            accessibilityRole="button"
-            style={[styles.btnFilled, { backgroundColor: t.accent }]}
-          >
-            <Text style={[styles.btnText, { color: t.onAccent }]}>Update engine</Text>
-          </Pressable>
+          {/* Absent, not disabled, when the engine is not a suspect — the same
+              rule the rest of the app follows: a control appears only where it
+              is real. */}
+          {stale && (
+            <Pressable
+              onPress={onUpdateEngine}
+              accessibilityRole="button"
+              style={[styles.btnFilled, { backgroundColor: t.accent }]}
+            >
+              <Text style={[styles.btnText, { color: t.onAccent }]}>Update engine</Text>
+            </Pressable>
+          )}
           <Pressable
             onPress={onRetry}
             accessibilityRole="button"
-            style={[styles.btnOutline, { borderColor: t.border }]}
+            style={stale ? [styles.btnOutline, { borderColor: t.border }] : [styles.btnFilled, { backgroundColor: t.accent }]}
           >
-            <Text style={[styles.btnText, { color: t.accent }]}>Try again</Text>
+            <Text style={[styles.btnText, { color: stale ? t.accent : t.onAccent }]}>
+              Try again
+            </Text>
           </Pressable>
         </View>
       </View>

@@ -76,7 +76,8 @@ not attempt.
 
 ## 2. Downloading
 
-Three separate code paths save a file, and they are separate on purpose. See
+**Four download paths, five ways in** — `instantDownload` and the format sheet
+both land in `beginDownload`. They are separate on purpose. See
 [FLOWS § 4–7](FLOWS.md).
 
 | Path | Trigger | Quality from | Publishes to gallery | Marks the video "taken" |
@@ -88,17 +89,25 @@ Three separate code paths save a file, and they are separate on purpose. See
 
 ### The FAB
 
-`BrowserScreen` renders it only on Browse. Six states, each with its own glyph
-because v2 has no chrome to put words in:
+`BrowserScreen` renders it only on Browse. Five reachable states, each with its
+own glyph because v2 has no chrome to put words in:
 
 | State | Glyph | Meaning |
 |---|---|---|
 | `idle` | download (line colour, inert) | Not a watch page |
 | `ready` | download (filled, tinted) | A video is on screen |
 | `resolving` | hourglass | Reading formats |
-| `working` | close + progress ring | Downloading; tap cancels |
 | `done` | check (saved green) | Tap opens Library |
 | `failed` | refresh (warn) | Tap retries |
+
+**There is a sixth state in the type and it is unreachable.** `DownloadState`
+still carries `working`, but `setDl` is never called with it — the button is
+handed back the moment a job joins the list, so `fabState` can never resolve to
+it. The ring (`FabRing`), the press guard, the hold guard and the reset guard
+that test for it are all dead code, and "tap cancels" was never true after N8.
+Progress belongs to the Library row and the ongoing notification. Do not restore
+the `working` state without re-reading [UI.md § The download rule](UI.md#the-download-rule):
+holding the FAB for the length of a download is the behaviour that was removed.
 
 - **Tap commits.** It takes whatever `settings.instant` is (`audio` or `video`)
   and starts, because the common case is wanting this one the same way as the
@@ -131,18 +140,196 @@ picking a format starts one.
   403s. Standalone downloaders mint them by running BotGuard in a synthetic
   environment, which is fragile and is why they keep dying. Spool *is* a browser:
   `POTOKEN_SCRIPT` harvests the `pot` parameter off the page's own media URLs and
-  out of the player response, plus `visitorData` from `ytcfg`. A harvested token
-  is a web token and only validates against web-client requests, so supplying one
-  pins `player_client=web`.
+  out of the player response, plus `visitorData` from `ytcfg`.
+
+- **A token belongs to one video, and is stored that way.** yt-dlp's PO Token
+  Guide is explicit: *"Most PO Tokens (such as for `web` GVS/Player) are bound to
+  the video ID, so a new token is required for each video."* The app used to hold
+  a single token — whichever the page last minted — and spend it on every
+  download, so a token harvested while watching A and used on B was not a weaker
+  token but the wrong one, and the media fetch 403'd. That failure is
+  indistinguishable from a refused client, which is why it hid for so long.
+
+  **The harvester was blind, and as of 2026-08-23 it is not.** The first version
+  hooked `JSON.parse`, `fetch` and `XMLHttpRequest.open`, and across 25 seconds
+  of measured playback it saw **zero** media URLs — it had not even reached the
+  point of looking for a token. Three independent reasons, each sufficient on
+  its own:
+
+  - the watch page's first player response is inlined as
+    `var ytInitialPlayerResponse = {…}` and evaluated by the JavaScript parser,
+    so nothing calls `JSON.parse` on it;
+  - `Response.json()` parses natively in C++ and never calls `JSON.parse`, so
+    every SPA navigation's `/youtubei/v1/player` fetch was missed too;
+  - hooking `XMLHttpRequest.open` sees the request and never the response, which
+    is the half a player response arrives in.
+
+  The rule the file follows now is **harvest where the data lands, not where you
+  imagine it passes**: a property trap on `ytInitialPlayerResponse`, a hook on
+  `Response.prototype.json`, an XHR `load` reader, the original `JSON.parse`, a
+  scan of request bodies for a `poToken` field, and the media-URL hooks. `saw`
+  reports which of them fired, and exists because "no token" had two
+  indistinguishable causes for a day.
+
+  **What the working harvester found is that this session has no token to give.**
+  Measured on 2026-08-23 across four videos: the hooks fire (`saw` reaches
+  `req,parse,sd,sabr,url`), `streamingData` is reached, media URLs are seen —
+  and the streaming data is **SABR-only**, its `serverAbrStreamingUrl` carries no
+  `pot`, and no InnerTube request body contains a `poToken` field. YouTube is
+  not challenging this session, so the page never mints one; consistent with
+  every download in the same pass succeeding on a tokenless client.
+
+  That is an answer rather than a failure, and it changes what is left to do. A
+  session that *is* challenged puts `pot` on the media URLs, and those hooks now
+  demonstrably fire. What remains genuinely out of reach is the SABR case, where
+  the token travels in a protobuf request body — see § the harvest's remaining
+  blind spot.
+
+  `core/tokens.ts` keys them by video id with a 6-hour TTL, and every report
+  from the page names the video it belongs to — taken from the player response's
+  own `videoDetails.videoId`, never from `location.href`, because YouTube
+  prefetches the *next* watch page while the current one is still on screen.
+  **Absent beats wrong**: with no token yt-dlp walks the open clients and may
+  still succeed; with the wrong one it pins itself to a web client and fails.
+
+- **The harvest's remaining blind spot is SABR, and it is a parsing problem
+  rather than a vantage one.** Under SABR the page issues one adaptive media
+  request whose body is protobuf, and the token is a field inside it. No hook
+  placed in page context can read that without decoding the message, and
+  `WebViewClient.shouldInterceptRequest` on the native side would see the same
+  bytes and have the same problem — so the native rewrite that looked like the
+  answer while the harvester was blind is not one. If this ever becomes the
+  blocking issue, the work is a minimal protobuf field reader, not a change of
+  vantage point.
+
+- **A token must never make the app worse than having none.** Holding one
+  narrows the walk to the two clients that could have minted it, so a token that
+  is expired, bound to another video or simply the wrong context would leave two
+  chances where a tokenless request had five. `attempts()` therefore appends the
+  whole open chain, token dropped, after the token chain is exhausted — the walk
+  ends where it would have started had nothing been harvested.
+
+- **The token names its own client.** `po_token` is supplied as
+  `CLIENT.CONTEXT+TOKEN` and a token labelled for a client we are not asking as
+  is ignored. `gvs` is the context — the Google Video Server media fetch is the
+  request that 403s. The client used to be hardcoded to `web` in Kotlin, which
+  was wrong twice: our page is `m.youtube.com`, so the token is an `mweb` one,
+  and `web` is SABR-only. `TOKEN_CHAIN` now walks `mweb → web` so the pairing is
+  measured rather than asserted.
 - **Client chain.** Without a token the only lever is which InnerTube client to
-  impersonate, and which of them still serve unattested requests changes month to
-  month. `CLIENT_CHAIN = ['android_vr', 'tv', 'ios', 'web', null]`, walked in
-  order; the last worked client is remembered and tried first next time. `null`
-  is yt-dlp's own default chain, kept last so a future version that has already
-  solved this wins without a code change.
-  **Retune this list in TypeScript, not Kotlin.**
+  impersonate. The order is not a hunch — it follows yt-dlp's published
+  requirement table:
+
+  | Client | GVS token | Player token |
+  |---|---|---|
+  | `tv` | none | none |
+  | `web_embedded` | none | none (embeddable only) |
+  | `mweb` | required | none |
+  | `web` | required | none, and SABR-only |
+  | `android` / `ios` | required | required |
+  | `android_vr` | **required since 2026** | none |
+
+  `OPEN_CHAIN = ['tv', null, 'web_embedded', 'mweb', 'android_vr']`. `tv` leads
+  because it needs nothing at all, and the DRM-only formats it is otherwise
+  known for are exactly what the cookie handoff prevents — being a real browser
+  makes it a good first choice for us and a bad one for a standalone
+  downloader. `null` is yt-dlp's own default, second because it is maintained
+  weekly by people watching this change.
+
+  **`android_vr` is now last, having been first.** yt-dlp issue #17348: it
+  requires a GVS token for everything except **format 18**, so without one it
+  answers with a single muxed 360p and nothing else. That is precisely the
+  degraded manifest that made downloads look broken for weeks. It stays on the
+  list only because one muxed 360p beats nothing, and `judgeManifest` settles
+  for it only after everything else has failed.
+
+  The last worked client is remembered and tried first next time — **separately
+  for the tokened and tokenless walks**, since a client pinned while tokenless
+  means something different, or nothing, on a request carrying a token.
+  **Retune these lists in TypeScript, not Kotlin.**
+
+- **The chain reorders itself, and remembers across launches.** `core/clients.ts`
+  keeps a score per `(mode, client)` in AsyncStorage, moved by
+  `next = 0.75 × score + (won ? 1 : −1)` and bounded at ±4. Without it every
+  cold start re-paid the whole walk: measured over six downloads, `tv` leads the
+  open chain and was refused 3/3 on that device with `The page needs to be
+  reloaded`, costing seconds off the front of the first download of every
+  session for a client already proved wrong there. Verified after the fix — a
+  fresh launch went straight to the winning client with no refusal at all.
+
+  Three properties keep it safe. It **never removes a client**, only reorders,
+  so a board that has learned something wrong costs time and can never be the
+  reason a download fails. A difference under 0.5 does not reorder anything, so
+  one unlucky request cannot outvote the requirement table above. And it is
+  **wiped when the engine replaces its own extractor**, because the scores
+  describe how the old extractor got on with YouTube and after an update neither
+  side is the one that was measured.
+
+  A degraded manifest scores as a loss — from the user's side a client returning
+  one muxed 360p and a client returning 403 are the same event. A cancel or a
+  dropped connection scores *nothing*: no client deserves blame for the user
+  leaving a tunnel.
+- **Downloads resume, because they are named for what they are.** The output
+  used to be named for the job id, which is minted per attempt — so yt-dlp, whose
+  `--continue` is on by default, never had a partial to continue into. A 141 MB
+  save interrupted at 90% began again at 0%, every time, on precisely the
+  connection that had already proved it would interrupt one, and each abandoned
+  `.part` sat in app-private storage until the 24-hour sweep. `partialKey` now
+  names it `{videoId}.{a|vHEIGHT}`: stable across retries of the same video at
+  the same quality and distinct across everything else, since a `.part` belongs
+  to one format and resuming a 720p body into a 1080p file would corrupt it.
+  Measured end-to-end — a download cut at 1,622,016 bytes resumed from exactly
+  1,622,016 rather than from zero.
+
+  The name being shared means "a file with this name exists" is no longer proof
+  that *this* attempt wrote one, which is why `finished()` prefers a file
+  modified since the attempt began. Falling back to an older one is still right:
+  that is the "already downloaded" case, and a complete file of exactly the video
+  and quality asked for is the correct answer whoever wrote it.
+
+- **A decoration must never fail the thing it decorates.** Measured on a
+  31-minute save: the audio downloaded fully, converted to a 73 MB m4a, had its
+  source deleted — and the job then failed with `Postprocessing: Conversion
+  failed!` because the *cover art* would not embed. The file was complete and
+  correct on disk and the user was told the download did not finish. (The proof
+  is in the sizes: the clean re-run's m4a is 438 KB larger, which is the cover
+  the failed one never got.) `finished()` is now consulted on the failure path
+  too, and a complete file is kept with the engine's complaint carried across as
+  `salvagedFrom` so the log can say why a success has an error beside it.
+
+  Three exclusions make that safe rather than merely forgiving: `.part` and
+  `.ytdl` are a download in progress, images are `--embed-thumbnail`'s leftovers,
+  and `.fNNN.` intermediates are the two halves of a merge yt-dlp never
+  completed — without that last one a video whose merge failed would be
+  published as a silent film. A cancel is excluded outright. Verified in the
+  dangerous direction: a download killed mid-transfer still fails, publishes
+  nothing, and adds no library row.
+
 - **Listing and downloading must agree on one client** — a format id from one
   client's manifest 403s when fetched as another.
+- **`looksBlocked` is grown from logs, never from guesses.** It decides whether
+  a failure is worth another client, and every phrase in it was put there by a
+  measured failure: `format is not available`, and — found on a release build
+  minutes after the flight recorder went in — `The page needs to be reloaded`,
+  which stopped a walk on the second client of five with three untried. `nsig`
+  went in beside it. Being wrong in this direction costs one extra round of the
+  chain; being wrong in the other costs a video that never downloads.
+
+- **A client is judged on its answer, not only on whether it threw.** A refusal
+  does not always arrive as an error: a client can return, successfully, a
+  manifest holding one muxed 360p and nothing else. `judgeManifest` calls that
+  degraded — no formats at all, or no audio-only rung, which every healthy
+  YouTube manifest has — and the walk carries on rather than pinning it.
+
+  Measured on the phone, against the chain as it then stood: `android_vr`
+  answered thinly, nothing threw, it was pinned for the whole session, and every
+  client behind it went unasked. Everything downstream then behaved correctly on a manifest
+  that was wrong, and the replay rule found no audio stream and gave up without
+  a word.
+
+  A degraded answer is **kept, not discarded**: if the whole chain does no
+  better, the best one seen is returned. That is what makes it safe to judge
+  harshly — being wrong costs a slower walk, never a failed download.
 - **Self-repair.** If every client is refused, the engine updates its own
   extractor once per session and walks the chain again. A sideloaded app gets no
   store updates, so in-place repair is the only path there is.
@@ -153,6 +340,17 @@ picking a format starts one.
 - **Merging** is yt-dlp's own, with the bundled ffmpeg
   (`--merge-output-format mp4`), which handles codec pairs `MediaMuxer` cannot.
   A video-only stream is selected as `<id>+bestaudio/best`.
+- **Every selector ends in a term that cannot name nothing.** Each id is
+  followed by a description of the same stream, and the chain ends at `best`.
+  An id only means something inside the manifest it came from, and `bestaudio`
+  itself is absent from a degraded manifest — so without a total tail, yt-dlp
+  answers `Requested format is not available` and the download fails on a video
+  whose audio was sitting inside a muxed rung.
+- **A muxed stream counts as audio when nothing else is on offer.** `bestAudio`
+  falls back to the smallest muxed format rather than returning `undefined`;
+  `-x` extracts the audio track from it exactly as it would from a separate
+  stream. Before this, a degraded manifest meant an audio save was impossible by
+  construction, and the replay rule's response was to return silently.
 - Every download gets `--embed-thumbnail` and `--embed-metadata`, so a file
   carries its cover and artist into any other player on the device.
 - Audio downloads are extracted to `m4a`.
@@ -232,13 +430,26 @@ and play from a `file://` path.
 ### Errors
 
 `readableError(e, stage)` turns yt-dlp's developer-facing stderr into one short
-sentence, and always logs the raw message as `[spool] engine error`. **When a
-failure makes no sense, read logcat before believing the copy** — several real
-failures (`ENAMETOOLONG`, a dropped connection) once fell through to a generic
-"check free space and connection" on a phone with 26 GB free.
+sentence, and always records the raw message **and the native error code** into
+the flight recorder (§16). The code is the better discriminator: `E_NO_OUTPUT`,
+`E_TRIAL_TOO_LONG` and `E_DOWNLOAD` are three very different failures that can
+reach the same sentence.
+
+**When a failure makes no sense, read the log before believing the copy** —
+several real failures (`ENAMETOOLONG`, a dropped connection, and
+`Requested format is not available`) fell through to a generic "check free space
+and connection" on a phone with 26 GB free. That last one is now its own branch,
+because it is about the *manifest* and has nothing to do with either the disk or
+the connection the fallback names.
 
 The `stage` argument matters: telling someone whose disk is full to update their
 extractor sends them to the one screen that cannot help.
+
+**No download path may fail silently.** Every one of the four ends in either a
+saved row or a failed row that names a reason. The replay rule used to `return`
+when it found no usable format — no file, no row, no notice and no log line, on
+a rule whose whole contract is "this will be kept after N plays". It now throws
+a stated error like the others and records the failure.
 
 ---
 
@@ -354,6 +565,11 @@ then **On this device · N items · X GB**.
   common causes — a dropped connection, a momentary refusal, a since-updated
   extractor — are all fixed by asking again. The old row goes, so a retry does
   not leave its own failure sitting above the result.
+
+  A retry the **trial** refuses keeps the trial's own sentence on the row and
+  opens the subscribe sheet, as the FAB does — a person has just tapped and is
+  waiting. It used to throw a plain error that `readableError` rendered as
+  "check free space and connection", so the button looked like it did nothing.
 
 ### Adoption — the library rebuilds itself from the gallery
 
@@ -493,9 +709,11 @@ capability in one place and deny it in another.
 
 **Where:** `screens/SearchScreen.tsx`
 
-The local index answers instantly, on a **title or artist** substring — a music
-library that cannot be searched by artist reads as a broken search rather than a
-title-only one. **The cloud is a button
+The local index answers instantly, on **title and artist** — a music library that
+cannot be searched by artist reads as a broken search rather than a title-only
+one. **Every word must appear, in any order, in either field**; the query is not
+one substring. "jana gana mana anthem" used to find nothing over "Jana Gana Mana
+- National Anthem" because the phrase was not contiguous there. **The cloud is a button
 and never an automatic second query** — nothing here may fire a network request
 on a keystroke, and the screen says so in a footnote.
 
@@ -509,8 +727,12 @@ ours. Recent searches are capped at 8.
 
 **Where:** `screens/ProfileScreen.tsx`, `sheets/ChoiceSheet.tsx`
 
-- Identity: "This device — No account · nothing leaves the phone". There is no
-  account, so there is nothing else to say.
+- Identity: the account's email and "Spool account · signed in", or "This
+  device — No account · nothing leaves the phone" when signed out.
+- **Account** (or **Sign in**) opens the account sheet: sign in / create,
+  forgot-password over WhatsApp, the device list, sign out. **Subscription**
+  opens the paywall; subscribed it reads the days left to `paidThrough` (or
+  "Active" when that date is not known yet), never the token's lease. See § 17.
 - **Keep automatically**: the whole replay rule in one card — switch, threshold,
   Keep as, and the two quality rows. Everything the rule does elsewhere is
   invisible, which makes the copy here part of the feature rather than labelling.
@@ -524,6 +746,26 @@ ours. Recent searches are capped at 8.
   what youtubedl-android reports until an update has actually run — stays
   uncoloured, because green would assert the one thing not established. Warn
   when three or more downloads failed today.
+- **Sign out of YouTube** — "Library stays". Confirms first, then drops every
+  cookie, the WebView's DOM storage, and any cookie jar on disk, and remounts
+  the browser on a signed-out home feed with a "Signed out on this device"
+  notice.
+
+  Until this landed there was **no way out of a signed-in session**. The WebView
+  keeps one across restarts by design — that is the pair that makes the app open
+  on the user's own feed — and the only exit was Android's "Clear storage",
+  which also deletes every automatic save the user has. So in practice a phone
+  that had been signed in stayed signed in, including a lost or handed-on one.
+
+  Always shown, never conditional on a session existing: reading that would mean
+  a native call, and a row you can only find once you are signed in is a row you
+  cannot find when you want it.
+
+  **It does not sign the user out at Google**, and the dialog says so. That
+  session is Google's and only Google can end it, from the account's device
+  list. What this removes is the device's copy, which is the half the app is
+  responsible for — a control labelled "sign out" that leaves a session standing
+  somewhere is a lie the user cannot check.
 - The legal line.
 
 A "Wi-Fi only" row used to sit here. Nothing enforced it — reading the
@@ -905,7 +1147,11 @@ below luma 22.
 Three layers of memory — an in-memory map, an in-flight map so eight rows
 appearing at once produce one native call, and AsyncStorage. **Failure is
 remembered too**, or an item with no artwork anywhere would be retried on every
-render for the life of the app. At most 3 resolutions run at once, so a first
+render for the life of the app — **but for a day, not forever**, and a cover
+whose cached file Android has since deleted is dropped at launch and rebuilt.
+Both used to be permanent, and between them they left most of a real library
+drawn blank over files with covers embedded (see
+[DATA.md § dl.artwork](DATA.md)). At most 3 resolutions run at once, so a first
 launch against a few hundred saved items does not open a few hundred connections
 for rows nobody has scrolled to.
 
@@ -938,9 +1184,13 @@ seconds per video. There is nothing on the device to clear or reinstall past.
 - **Clock rollback is caught two ways**: before `BUILT_AT`, or behind the
   furthest-forward time ever seen — both with 26 hours of slack for time zones,
   DST and NTP.
-- **The save counter is mirrored** into `externalMediaDirs`, which survives both
-  "Clear storage" and an uninstall. Reads take the larger of the two stores. A
-  tester who clears storage to reset the count loses their whole library doing it.
+- **The save counter is mirrored** into `externalMediaDirs`, and reads take the
+  larger of the two stores. **The mirror no longer outlives either "Clear
+  storage" or an uninstall** — measured on Android 15, `pm clear` empties
+  `/sdcard/Android/media/<pkg>/` and an uninstall deletes it, because Android 11
+  brought that directory under the same cleanup as `Android/data`. So the count
+  *is* resettable by reinstalling. The expiry is not: it is stamped into
+  `BuildConfig` and there is nothing on the device to clear.
 - **A slot is spent only once a file exists.** A save that failed halfway costs
   the tester nothing.
 - The signature pin is skipped when empty, so debug builds do not refuse to run.
@@ -958,9 +1208,10 @@ last day: one state change, once. Tapping opens the sheet.
 
 The sheet shows **once per cold launch**, not once ever — the build expires, and
 a tester who never reads why reads "it stopped working" instead. On a fresh
-install it is deferred to the *end* of first run, so the legal notice comes
-before the sales pitch and a tester who installs, taps through and never
-relaunches is still told this is a pre-release. The prices are stated the way
+install it is **not** raised at all unless the tester taps *See the offer*: first
+run's own Premium step already says the build is a pre-release that expires, and
+two pitches ten seconds apart is the same person sold to twice (see § 13).
+Verified on a fresh install on the S21 FE, 2026-09-19. The prices are stated the way
 they are true: the launch price is labelled *expected*, not struck through, since
 nobody has ever paid it.
 
@@ -968,20 +1219,28 @@ nobody has ever paid it.
 
 ## 13. First run and permissions
 
-**Where:** `screens/FirstRunScreen.tsx`
+**Where:** `screens/OnboardingScreen.tsx`
 
-One screen, once. It points at the download button plainly a single time, says
-where files go, and carries the legal notice: downloading from YouTube violates
-YouTube's Terms of Service; the app is built for your own uploads, Creative
-Commons and public-domain material, and personal offline use where local law
-allows it.
+Three steps, once: **Welcome → What it does → Premium → Browse.** Button-driven,
+not swipeable. The legal notice is on the first step, above the button that
+accepts it — downloading from YouTube violates YouTube's Terms of Service; the
+app is built for your own uploads, Creative Commons and public-domain material,
+and personal offline use where local law allows it. The layout rules and the
+argument for each are in [UI.md](UI.md#first-run--three-screens-once).
 
-Two things on this screen are currently out of step with the rest of the app and
-should be fixed rather than copied: the **"Choose folder"** button opens no
-picker — it flashes a notice saying where files go, which is a control that
-labels rather than does — and the destination it names is `Movies/Spool`, while
-audio actually lands in `Music/Spool`. It is also the one screen still on the v1
-token names (`t.text`, `t.border`, `t.accentSurface`) rather than the v2 palette.
+The premium step is absent for a subscriber, and it is the **only** sales
+surface on this path: the sheet that used to be raised the instant first run
+ended is now raised only from `See the offer`, because two pitches ten seconds
+apart is the same person sold to twice.
+
+This replaced a single `FirstRunScreen`, which carried three defects this entry
+used to list as "should be fixed rather than copied". All three are gone with
+it: a **"Choose folder"** button that opened no picker and whose only effect was
+a notice the screen could not render; a destination named as `Movies/Spool` when
+audio lands in `Music/Spool`; and the v1 colour aliases (`t.text`, `t.border`,
+`t.accentSurface`) rather than the v2 palette. Worth knowing that the last one
+was re-introduced once, by copying the old screen as a starting point — a
+deprecated alias spreads by being adjacent to the work, not by being chosen.
 
 Permissions are requested at the **end** of first run, and this ordering has
 bitten twice:
@@ -1002,17 +1261,55 @@ bitten twice:
 
 ## 14. Privacy
 
-- No account, no identifiers, no analytics, no crash reporting, no server.
+- No analytics, no crash reporting. **An account is optional** and nothing asks
+  for one until the user wants to pay.
+- **One server, and only accounts and subscriptions touch it.** Signed out and
+  never subscribed, the app never contacts it: `syncLicence` returns before the
+  fetch without a session, and a debug build configures no server at all.
+- **Signed in, the server knows** the account's email, each device's
+  `ANDROID_ID` hash and a human label for it ("Samsung SM-A515F"), the city it
+  derives from the request, and — for the one-device-at-a-time play lock — *when*
+  this device starts and stops playing. Never *what*: no titles, no library, no
+  play history, no search.
+- **Paying sends a screenshot of a UPI receipt** and the text read from it on the
+  device. That names the payer and their UPI ID, and the server keeps it,
+  because a payment that has to be checked by a person has to be checkable. The
+  pay step says so on screen. See § 17.
 - Outbound requests are YouTube's own (through the page and through yt-dlp,
   using the browser's session) and cover art from `i.ytimg.com` — **plus
-  `lrclib.net`, and only ever from a tap.** See § Lyrics: it is off until the
+  `lrclib.net`, and only ever from a tap**, and the licence server above. See § Lyrics: it is off until the
   user has read what is sent and agreed, it never fires on a track starting, and
   it carries the track name, artist and length and nothing else.
 - `core/plays.ts` is the only module that records behaviour rather than results,
   and it stores three numbers per video with no timeline. It must never make a
   network call.
-- The cookie file is written to `cacheDir` and used only as `--cookies` for the
-  local yt-dlp process.
+### The YouTube session
+
+Signing in is optional and nothing asks for it, but the app is a browser, so it
+can happen — and once it has, the device holds a credential. Four things follow
+from that, and all four are the app's responsibility rather than Google's.
+
+- **The cookie jar handed to yt-dlp is ephemeral.** One per extraction and per
+  download, under `noBackupFilesDir/session/`, owner-only, deleted in the
+  caller's `finally`. It used to be one fixed `cacheDir/youtube-cookies.txt`
+  that nothing ever deleted, so a device that had ever been signed in carried a
+  plaintext copy of the login for the life of the install. It is **not**
+  encrypted, deliberately: yt-dlp needs a real path to a readable file, so
+  encrypting at rest only means decrypting to a second plaintext file at the
+  moment of use. Time is the lever, not ciphertext. See
+  [NATIVE.md § 8](NATIVE.md#8-cookiejarkt).
+- **The session is excluded from backup.** `app_webview/` — where the WebView
+  keeps the session — is excluded from both Android cloud backup and
+  device-to-device transfer, so the login cannot leave the phone it was granted
+  on. See [DATA.md § 7](DATA.md#7-the-survival-matrix).
+- **The sign-in page cannot be screenshotted or screen-recorded.** FLAG_SECURE
+  is raised while the page is on a Google sign-in host (`isSignInPage`) and
+  cleared everywhere else, including on unmount. It is per-window, so leaving it
+  on would quietly stop the user screenshotting their own library.
+- **There is a way out**, which there was not before. See § 7.
+
+The app never sends the session anywhere but YouTube. It is read by
+`CookieManager`, written to a local file, and passed to a local process.
 
 ---
 
@@ -1067,12 +1364,294 @@ Things that look missing and are not:
   that move and change nothing are the one thing this design refuses
   everywhere**, so until one of those routes is taken there is no equaliser.
 
-- **Volume normalisation** — same answer, one step further along. It needs a
-  loudness figure per track, which means measuring the file: ffmpeg *is*
-  bundled, but `com.yausername.ffmpeg.FFmpeg` is there to install the binary for
-  yt-dlp rather than to run filters, and building a measurement path on an API
-  that has not been confirmed is how unverifiable native code ships. The plan if
-  it is picked up: measure once at save time with `ebur128`, store the LUFS
-  figure on the record, and apply the trim through `player.volume`, which *is*
-  exposed.
+- **Volume normalisation** — not built, but the route is known and the dead end
+  has been ruled out rather than guessed at. It needs a loudness figure per
+  track, which means measuring the file.
+
+  `com.yausername.ffmpeg.FFmpeg` **cannot run it** — read out of
+  `ffmpeg-0.18.1.aar`, the class has exactly two public members, `init(Context)`
+  and `getInstance()`. It is an installer, not a wrapper: it unpacks
+  `libffmpeg.so` and `libffprobe.so` (per ABI, plus a `libffmpeg.zip.so`
+  payload) into a private `binDir` for yt-dlp to invoke. So there is no API to
+  call, and anything built on the assumption that there is would not compile.
+
+  What *would* work is what yt-dlp itself does — run the unpacked binary as a
+  subprocess: `ffmpeg -i <file> -af ebur128 -f null -` and parse the `I:` line
+  for LUFS. Measure once at save time, store the figure on the record, apply the
+  trim through `player.volume`, which **is** exposed. That is a real piece of
+  work against a private path of somebody else's library, and it needs a device
+  to prove on, which is why it is here rather than in the code.
 - **A share chip and like counts on the player** — those are YouTube's.
+
+---
+
+## 16. Diagnostics — the flight recorder
+
+**Where:** `core/log.ts` (the recorder), `core/crash.ts` (the captures),
+`core/bootstrap.ts` (installed first), `ui/ErrorBoundary.tsx`, and one row on
+Profile.
+
+Every failure this app has been debugged through was diagnosed from `logcat`
+with a cable attached. That is the wrong instrument for the failures that
+actually matter here — a download that dies in a pocket, a page that stops
+playing with the screen off, a crash that takes the process with it. By the time
+anyone asks "why", logcat has rotated and the evidence is gone.
+
+So the app keeps its own record.
+
+### What it records
+
+- **Flows.** A `flow()` opens a correlation id and every entry under it carries
+  ms-since-open. This is the half that answers *how* rather than *what*: a
+  download crosses four files, two languages and a foreground service, and the
+  interesting failures are all orderings. Flat lines cannot show that when two
+  downloads overlap; a shared id can. Five scopes carry a `flow()` id —
+  `extract`, `download`, `replay`, `card`, `retry` — and the rest are plain entry
+  scopes: `save`, `engine`, `crash`, `boot`, `token`, `ui`, `diag`. `scope` is a
+  free `string`, not a union type, so nothing catches a new one that never
+  reaches this list.
+- **The manifest, every time.** `shape()` records total / audio-only / muxed /
+  video-only counts and the heights on offer. One line, and it is the line that
+  makes a degraded manifest obvious instead of a mystery.
+- **The native error code**, not just the message — see §2 Errors.
+- **Everything already on `console`.** The bridge in `crash.ts` folds the app's
+  existing `[spool] …` lines into the same record, so nothing had to be rewritten
+  to be captured.
+- **Crashes.** The global error handler, unhandled promise rejections, and a
+  render fault caught by `ErrorBoundary` (which also keeps the component stack —
+  it names the screen, which a bundle-offset JS stack does not).
+
+### Rules that are load-bearing
+
+- **It never throws.** Every entry point is total, including against a circular
+  object, a getter that throws, and a storage layer refusing writes. A logger
+  that can fail turns a recoverable bug into a crash, on the exact path that was
+  already going wrong.
+- **It never records a credential.** `redact` matches on the *key* — a token has
+  no shape worth matching, and this file ends up in `Downloads/`. The presence
+  is the diagnostic, so `poToken: "<redacted 214>"` still answers both "was
+  there one" and "was it plausible".
+- **The previous run is moved aside at boot, before this one writes.** This is
+  the whole reason for persisting at all: a crash ends the process without
+  warning, and if the next launch wrote into the same key, the boot sequence of
+  the run trying to explain the crash would overwrite it.
+- **Errors flush immediately; everything else is debounced.** An error is the
+  one entry that might be followed by the process dying.
+- **`debug` is dropped unless asked for.** It is the level that fires per
+  progress tick, and letting it in evicts the entries explaining the failure
+  with entries describing the thing working.
+
+### Getting it out
+
+**Profile → Export diagnostics** writes `spool-log-<timestamp>.txt` into
+`Downloads/Spool`, previous run first. It leaves as a file the user can read
+before they decide to share it, never as a report sent anywhere. The licence
+server (§ 17) is not a destination for this and has no route that would accept
+it — nothing in `core/log.ts` or `core/export.ts` can reach it. The row states the entry and error count before it writes.
+
+There is no reporting, no upload, and no identifier of any kind in the file
+beyond what the user was doing. §14 still holds.
+
+---
+
+## 17. Subscriptions
+
+**Where:** `LicenseGuard.kt` (decides), `core/license.ts` (describes),
+`core/account.ts` (the account and the one request helper), `core/payments.ts`
+(UPI orders and screenshot claims), `core/playLock.ts` (one device playing at a
+time), `sheets/SubscribeSheet.tsx`, `sheets/AccountSheet.tsx`,
+`sheets/PlayLockSheet.tsx`, the licence server (issues — not in this repo),
+Profile's Account and Subscription rows
+
+₹29 a month or ₹249 a year, **paid by UPI to the owner and proved with a
+screenshot**, on a sideloaded APK. There is no payment gateway — Razorpay was
+removed entirely. Google Play Billing does not apply because the app is not
+distributed through Play; if that ever changes, this whole feature has to
+change with it.
+
+**Same split as the trial, for the same reason.** `LicenseGuard` decides;
+`core/license.ts` only describes and fetches. A patched bundle can make the
+paywall vanish from the screen and still not get a download.
+
+### Accounts
+
+Email and password (`/v1/auth/register`, `/v1/auth/login`). A subscription
+belongs to the account, and the account works on any number of devices: each
+signed-in device asks `/v1/licence` with its own device hash and gets its own
+device-bound token. **Signed out, the app never asks for a licence at all** —
+the server would answer `entitled: false`, and a request whose answer is known
+only tells the server the app was opened.
+
+- The session is opaque, persisted as `dl.account`, sent as a Bearer header,
+  never logged.
+- `401 {"error":"signed out"}` or `403 {"error":"blocked"}` from any
+  authenticated route drops the session and forgets the licence (`request()` in
+  `core/account.ts`, the only place this is written). Blocked also opens the
+  account sheet on an explanation with a WhatsApp link to support. Anything
+  else that goes wrong — a throw, a timeout, a 5xx, an unparseable body, a 401
+  that is not exactly that answer — is no news.
+- Signing out on the device signs out locally first and tells the server
+  best-effort, and **takes the licence with it**: it was minted because that
+  account paid.
+- **Forgot password** is a prefilled WhatsApp message to support. There is no
+  reset form, because the server has no mail sender and a form that sent
+  nothing would be a control that lies. The number is `SUPPORT_WHATSAPP` in
+  `core/payments.ts`, replaced by the server's own once `/v1/pay/start` or
+  `/v1/pay/claim` has answered.
+- The device list (`/v1/account`) is shown in the account sheet: label, city,
+  last seen, and which one is this phone.
+
+### Paying
+
+1. **Choose a plan.** Signed out, the sheet asks for an account first and comes
+   back to itself afterwards (`openAccount({ next: 'paywall' })`).
+2. **`/v1/pay/start`** returns an order code, the amount, the payee's UPI ID and
+   a `upi://pay` link. The sheet shows a **"Pay ₹N with a UPI app"** button
+   (`Linking.openURL(upiUrl)`), a QR of the same link for paying from another
+   phone, and the UPI ID, order code and amount as selectable text. The order is
+   persisted (`dl.pendingOrder`) until it expires or is approved, because paying
+   means leaving for a UPI app and Android may kill Spool meanwhile.
+3. **Upload the screenshot.** Picked with `expo-image-picker` from the gallery
+   (the Android photo picker; the config plugin blocks the CAMERA and
+   RECORD_AUDIO permissions the library would otherwise add). The original is
+   OCR'd on the device by `YtDlp.recognizeText` — ML Kit's bundled Latin model —
+   and a copy is re-encoded by `YtDlp.shrinkImage` to a JPEG with a 1600 px long
+   edge, because the picker's `quality` leaves a PNG screenshot a PNG. Both go
+   to **`/v1/pay/claim`** as multipart: `order`, `text`, `image`. An OCR
+   failure still uploads, with empty text; the server routes that to a person.
+4. **`approved`** — the paid-through date is recorded and the licence synced
+   *before* the sheet says so. **`review` / `rejected`** — the server's reasons
+   are listed verbatim, with a "Send screenshot on WhatsApp" button that opens
+   the server's prefilled message (it carries the order code) and copy telling
+   the user to attach the screenshot there, since it cannot be attached for
+   them. "Try another screenshot" goes back to the upload step on the same order.
+
+"I have already paid" is always there before an answer: it forces a licence
+sync, which is how a claim approved by hand reaches the phone.
+
+A subscriber who opens the sheet sees the paid-through date and **"Pay for
+another period"** — which has to exist now that nothing renews on its own.
+
+### One device playing at a time
+
+`core/playLock.ts`. Signed in, the local player claims a lease
+(`/v1/play/claim`, 120 s) before it makes a sound, renews it every 60 s while
+playing, and releases it on pause and stop. Spotify's model, deliberately:
+
+- A start that meets `409 playing elsewhere` raises "Playing on *device*. Play
+  here instead?"; accepting claims with `takeover: true`, which ends the other
+  device's lease.
+- A heartbeat that meets 409 means someone took over: pause, and "Playback moved
+  to *device*", with the same offer to take it back.
+- **The network is not a reason to stop.** A claim that cannot reach the server
+  is allowed while the last successful server contact (`dl.serverContact`) is
+  under 24 h old (`OFFLINE_GRACE_MS`); past that, "Connect to the internet to
+  keep playing on this account". A failed heartbeat never pauses a track that is
+  already playing — only a *next* start is refused.
+- **The fast path is synchronous.** A device that holds a live lease — or is
+  signed out, which is most of them — starts sound exactly as fast as before.
+  Only a start without a lease waits on the network, capped at 5 s. Because the
+  lease is released on pause, **a resume after a pause does wait** for one
+  round trip; that is the price of releasing promptly.
+- Background timers are not trusted: nothing counts heartbeats, and a missed
+  one only means the next re-claims without takeover. The heartbeat runs while
+  anything is loaded, playing or not, so a pause from a path that never said so
+  (notification, sleep timer, another app taking focus) still releases within a
+  minute.
+
+Signed out, none of this runs. The browser's page playback is not covered — the
+lock is the local player's.
+
+### What a licence is
+
+A token the server signs and the phone verifies **offline**:
+
+```
+base64url(payloadJson) "." base64url(derSignature)
+{ v, dev, sub, plan, exp, iat }
+```
+
+Offline is the normal case, not the fallback — Spool plays a local library with
+the screen off and no network, so `LicenseGuard` never touches the internet. It
+reads what is already on disk. The app fetches a token when it happens to be
+online — at boot and whenever the app returns to the foreground
+(`watchLicence`), no more often than the server's `refreshAfter` (floored at
+five minutes) or six hours; nothing about entitlement waits on that.
+
+- **`dev` binds the token to the install** — SHA-256 of `ANDROID_ID`. Copying the
+  preferences file to another phone carries nothing.
+- **`exp` is a lease of at most about three days**, renewed on every
+  authenticated sync. It used to be `paid_through + 3 days`; it was shortened so
+  that a device signed out or blocked on the server stops being entitled within
+  days. The subscription's end is `paidThrough`, sent alongside the token and
+  persisted as `dl.licence` so it displays offline — **anything that says "days
+  left" reads that, never the token.** A device offline longer than the lease
+  loses *downloads* until it syncs; never its library or playback.
+- **The signature covers the ASCII of the first segment**, not the JSON it
+  decodes to, so the two implementations never have to agree about key order or
+  number formatting. `LicenseGuard.verify` checks before it parses.
+- **ECDSA P-256, not Ed25519** — `Signature.getInstance("Ed25519")` needs API 33
+  and minSdk here is 24.
+
+### Where it is enforced
+
+`YtDlpModule.download` asks `LicenseGuard.entitled` **before** `TrialGuard.refuse`,
+and skips the trial entirely when it answers yes. A subscriber is not a tester on
+raised limits — they are in a different state, with no expiry, no quota and no
+length cap — so asking about the trial at all would leave four ways for a stale
+trial fact to refuse someone who has paid. `refuseSave` in TypeScript makes the
+identical call for the identical reason.
+
+`spendTrialSlot()` is the other half of that: a subscriber's saves must not draw
+down the trial counter, which outlives an uninstall. A year of paid downloads
+would silently exhaust it, and the day the subscription lapsed the user would
+meet a trial already spent by their own paid usage.
+
+**A repackaged APK gets no licence.** `LicenseGuard.expiresAt` returns 0 outright
+when `TrialGuard.intact` fails. Without that the signature pin had a hole shaped
+like a paying customer: subscribe once legitimately, then decompile, patch and
+resign — the token still verifies, because it is signed by the server and says
+nothing about which APK holds it, and the trial's pin was being skipped for being
+entitled.
+
+### The offer, and how it is worded
+
+`₹249 a year` and `₹29 a month`, with the annual note stating the derived
+`₹20.75 a month`. Arithmetic on a real price may be printed. A struck-through
+number nobody has been charged may not — the same rule that governs the
+pre-release sheet's copy, and it is pinned by a test. **Nothing renews on its
+own**, and the notes say so (`Pay each month by UPI. Nothing renews on its
+own.`); a test forbids "cancel", "autopay" and "mandate" from creeping back.
+
+### Being offline never revokes a subscription
+
+The property most of `tests/license.test.mjs` exists to defend. Every route by
+which "we could not ask the server" becomes "you have not paid" is a paying
+customer locked out of music they already own, on a train, with no way to fix it.
+So:
+
+- a fetch that throws changes nothing;
+- a 500 changes nothing;
+- **a definite `entitled: false` changes nothing either** — clock skew, a
+  payment still under review and a half-finished migration all produce that
+  answer and all resolve themselves, while deleting a valid licence does not;
+- a token the native side refuses changes nothing.
+
+Only `rememberLicence` returning true moves anything, and it verifies first.
+The single exception is a session the server has *definitely* ended (the exact
+401/403 bodies above), which drops the licence with the session.
+
+### What the server is for, and what it is not
+
+A plain PHP + MySQL application, **not in this repository** — on the
+development machine it is at `c:\laragon\www\spool`, and `server/` here keeps
+only a reference implementation of the token format and the test that pins it.
+It signs licences, holds accounts, issues UPI orders, parses the OCR'd text of
+payment screenshots, and arbitrates the play lock. Its schema is its own
+README's business, not this book's.
+
+§14 is amended: signed in, the server knows the account's email, each device's
+hash and human label (e.g. "Samsung SM-A515F") and approximate city, and *when*
+a device starts and stops playing — never what. A payment sends a screenshot of
+a UPI receipt, which names the payer, and the OCR'd text of it; the pay step
+says so on screen.

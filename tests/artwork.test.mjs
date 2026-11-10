@@ -229,6 +229,67 @@ describe('remembering across launches', () => {
   });
 });
 
+describe('nothing is believed forever', () => {
+  // Measured on the S21 FE: most of a 104-item library drawn blank over files
+  // that each had a cover embedded, because a failure — or a cover in a cache
+  // Android had since emptied — was never looked at again.
+
+  test('a failure is retried once it is a day old', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+    const { resolveArtwork } = await load();
+    native.handlers.readArtwork = async () => {
+      throw new Error('offline');
+    };
+    const row = record('dl-1', { videoId: 'dQw4w9WgXcQ' });
+    assert.equal(await resolveArtwork(row), null);
+
+    t.mock.timers.tick(23 * 60 * 60 * 1000);
+    assert.equal(await resolveArtwork(row), null);
+    assert.equal(native.callsTo('readArtwork').length, 1, 'still remembered inside the day');
+
+    delete native.handlers.readArtwork;
+    t.mock.timers.tick(2 * 60 * 60 * 1000);
+    assert.ok(await resolveArtwork(row));
+    assert.equal(native.callsTo('readArtwork').length, 2);
+  });
+
+  test('a failure stored by an older build is looked at again', async () => {
+    seed('dl.artwork', JSON.stringify({ 'dl-1': null }));
+    const { loadArtworkIndex, resolveArtwork, artworkFor } = await load();
+    await loadArtworkIndex();
+    assert.ok(await resolveArtwork(record('dl-1', { uri: 'content://1' })));
+    assert.equal(native.callsTo('readArtwork').length, 1);
+    assert.ok(artworkFor('dl-1'));
+  });
+
+  test('a cover whose cached file is gone is rebuilt', async () => {
+    seed(
+      'dl.artwork',
+      JSON.stringify({
+        kept: { uri: 'file:///kept.jpg', dominant: '#111111' },
+        gone: { uri: 'file:///gone.jpg', dominant: '#222222' },
+      }),
+    );
+    native.handlers.filesExist = (uris) => uris.map((u) => !u.includes('gone'));
+    const { loadArtworkIndex, resolveArtwork, artworkFor } = await load();
+    await loadArtworkIndex();
+    assert.equal(artworkFor('kept').uri, 'file:///kept.jpg');
+    assert.equal(artworkFor('gone'), null, 'not drawn as a blank square');
+    assert.ok(await resolveArtwork(record('gone', { uri: 'content://2' })));
+    assert.equal(native.callsTo('readArtwork').length, 1);
+  });
+
+  test('a bridge that cannot answer leaves the index as it was', async () => {
+    seed('dl.artwork', JSON.stringify({ 'dl-1': { uri: 'file:///a.jpg', dominant: '#111111' } }));
+    native.handlers.filesExist = () => {
+      throw new Error('no such function');
+    };
+    const { loadArtworkIndex, artworkFor } = await load();
+    await loadArtworkIndex();
+    assert.equal(artworkFor('dl-1').uri, 'file:///a.jpg');
+  });
+});
+
 describe('forgetting', () => {
   test('lets a removed and re-added item look again', async () => {
     const { resolveArtwork, forgetArtwork, artworkFor } = await load();

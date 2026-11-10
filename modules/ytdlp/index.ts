@@ -20,6 +20,21 @@ export type DownloadArgs = {
   /** InnerTube client(s) to impersonate when no PO token is available. */
   clients?: string;
   /**
+   * The name this attempt writes under, without an extension.
+   *
+   * Stable across retries of the same video at the same quality, and *only*
+   * those — which is the whole point. yt-dlp resumes into the file it was
+   * writing before, so a name that changes per attempt means a 140 MB download
+   * interrupted at 90% starts again from zero, forever, on a connection bad
+   * enough to have interrupted it once. Every earlier attempt's `.part` was left
+   * behind for the 24-hour sweep to find.
+   *
+   * It must not be built from the title: the filesystem counts bytes and a
+   * styled-Unicode title blows the 255-byte limit before any audio lands. A
+   * video id is ASCII by construction.
+   */
+  resumeKey?: string;
+  /**
    * The video's length, so a pre-release build can refuse one that is over its
    * cap. 0 means the extractor did not say, and an unknown length is not
    * grounds for refusing.
@@ -47,7 +62,63 @@ export type TrialStatus = {
   maxSeconds: number;
 };
 
-export type DownloadResult = { path: string; bytes: number };
+/**
+ * What this device has paid for.
+ *
+ * Read from the native side for the same reason `TrialStatus` is: this ships as
+ * Hermes bytecode inside the APK it would be guarding. `LicenseGuard` re-checks
+ * the token's signature on every one of these calls rather than caching a
+ * boolean, so editing the preferences file by hand achieves nothing.
+ */
+export type LicenceStatus = {
+  /** True while the held token is genuinely ours, this device's, and unexpired. */
+  entitled: boolean;
+  /**
+   * Epoch ms the held token runs to. 0 when there is no licence.
+   *
+   * **A lease, not the subscription's end.** The server signs tokens that live
+   * a few days at most and renews them on every sync; when the subscription
+   * ends is `paidThrough`, which `core/license.ts` persists separately. Never
+   * print this as "days left".
+   */
+  expiresAt: number;
+  /** `"monthly"`, `"annual"`, or empty when there is no licence. */
+  plan: string;
+  /**
+   * This install's anonymous name — SHA-256 of ANDROID_ID, base64url.
+   *
+   * Derived natively so there is exactly one definition of it. A second one in
+   * JavaScript would eventually disagree, and a device that asks the server
+   * under one name and verifies tokens under another is a device that has paid
+   * and cannot prove it.
+   */
+  device: string;
+  /** Where to ask for a licence, compiled in at build time. Empty in debug. */
+  server: string;
+};
+
+/** What `shrinkImage` wrote. */
+export type ShrunkImage = {
+  /** `file://` in the app's cache. */
+  uri: string;
+  bytes: number;
+  width: number;
+  height: number;
+};
+
+export type DownloadResult = {
+  path: string;
+  bytes: number;
+  /**
+   * Set when the engine reported a failure *after* writing a complete file.
+   *
+   * Almost always a postprocessing step that only decorates — embedding cover
+   * art or metadata tags — failing on a download that was otherwise finished.
+   * The file is the one the user asked for; this is the engine's complaint,
+   * carried across so the log can say why a success has an error beside it.
+   */
+  salvagedFrom?: string;
+};
 
 /**
  * One file already in the gallery, as MediaStore describes it.
@@ -153,6 +224,15 @@ type YtDlpNative = {
     urls: string[],
   ): Promise<ArtworkResult>;
   /**
+   * Which of these cached covers are still on disk, in the order given.
+   *
+   * `readArtwork` writes to `cacheDir`, which Android and "Clear cache" may
+   * empty at any time, while the index that points at those files lives in
+   * AsyncStorage and survives. Without this a cleared cache leaves every row
+   * pointing at nothing, drawn blank, and never asked about again.
+   */
+  filesExist(uris: string[]): boolean[];
+  /**
    * Raises the media foreground service, and refreshes what it displays.
    *
    * The first call has to be made while the app is on screen — Android 12
@@ -183,8 +263,76 @@ type YtDlpNative = {
    * something the user asked for is playing, and unpin the moment it is not.
    */
   setWebViewVisible(pinned: boolean): void;
+  /**
+   * Drops the YouTube session: every cookie, the WebView's DOM storage, and any
+   * cookie jar still on disk.
+   *
+   * Resolves only once the removal has actually happened, because the caller's
+   * next act is to remount the WebView and a remount that overlaps it just
+   * repopulates the jar from the page it loads.
+   *
+   * It does not sign the user out at Google — that is a session on Google's
+   * side and only Google can revoke it. It removes this device's copy, which is
+   * the part the app is responsible for.
+   */
+  signOutOfYouTube(): Promise<void>;
+  /**
+   * FLAG_SECURE on the app's window: no screenshots, no screen recording, no
+   * mirroring to a non-secure display.
+   *
+   * Set only while the page is on a Google sign-in host, because the flag is
+   * per-window and leaving it on would stop the user screenshotting their own
+   * library. Fails open — an unreachable activity means no flag rather than a
+   * blocked sign-in.
+   */
+  setSecureWindow(on: boolean): void;
+  /**
+   * Sets the activity screen orientation ('landscape', 'portrait', or 'unspecified').
+   * Used for browser fullscreen video rotation.
+   */
+  setScreenOrientation(orientation: 'landscape' | 'portrait' | 'unspecified'): void;
+  /**
+   * Whether the user has battery-restricted Spool (Android's "Restricted"
+   * battery setting, or Samsung's sleeping apps). While it is, Android strips
+   * the playback service of foreground status the moment the screen goes off
+   * and refuses to restore it, so screen-off playback lasts only as long as the
+   * system tolerates the process. Nothing in the app can override it; it can
+   * only be noticed and reported. False before Android 9, which has no such
+   * setting.
+   */
+  backgroundRestricted(): boolean;
   /** What this build allows. Cheap enough to call on every launch and save. */
   trialStatus(): TrialStatus;
+  /**
+   * What this device has paid for. One ECDSA verification, no network, no
+   * preference cached as a boolean — cheap enough to call on every launch.
+   */
+  licenceStatus(): LicenceStatus;
+  /**
+   * Offer a token to the native side, which verifies it before keeping it and
+   * returns whether it did. A token that is malformed, signed by the wrong key,
+   * minted for another device or already expired is refused and changes nothing.
+   */
+  rememberLicence(token: string): boolean;
+  /** Drop the held licence. Used when the user hands the device on. */
+  forgetLicence(): void;
+  /**
+   * Read the text off an image — a UPI payment screenshot — with ML Kit's
+   * bundled on-device Latin model. Resolves every line, block by block, joined
+   * by `\n`; an empty string when there is no text. Nothing leaves the device
+   * here: the caller decides what to send.
+   *
+   * Rejects `E_OCR_READ` when the file cannot be opened and `E_OCR` when the
+   * recognizer fails. Accepts `file://` and `content://` uris.
+   */
+  recognizeText(uri: string): Promise<string>;
+  /**
+   * Re-encode an image as a JPEG whose long edge is at most `maxEdge`, at
+   * `quality` (30–95), into the app's cache. Exists because the picker's own
+   * `quality` leaves a PNG screenshot a PNG. Only the latest result is kept on
+   * disk. Rejects `E_IMAGE`.
+   */
+  shrinkImage(uri: string, maxEdge: number, quality: number): Promise<ShrunkImage>;
   addListener(event: 'onProgress', listener: (e: ProgressEvent) => void): EventSubscription;
   addListener(
     event: 'onPlaybackCommand',
@@ -205,3 +353,14 @@ export function onPlaybackCommand(
 ): EventSubscription {
   return YtDlp.addListener('onPlaybackCommand', listener);
 }
+
+export function setScreenOrientation(
+  orientation: 'landscape' | 'portrait' | 'unspecified',
+): void {
+  try {
+    if (typeof YtDlp?.setScreenOrientation === 'function') {
+      YtDlp.setScreenOrientation(orientation);
+    }
+  } catch {}
+}
+

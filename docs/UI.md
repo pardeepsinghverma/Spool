@@ -85,7 +85,7 @@ tint (`#F5EFE7` on sepia, `#EAF3F1` on teal) rather than staying neutral.
 
 | Role | Size / weight | Use |
 |---|---|---|
-| `nowPlaying` | 24 · 700 | full player title |
+| `nowPlaying` | 24 · 700 | full player title — **but both consumers override the size**: the player title renders at 21, Profile's avatar at 18, and nothing in the app draws it at 24 |
 | `screenTitle` | 20 · 600 | Library, Profile headers |
 | `rowTitle` | 15 · 600 | list rows |
 | `body` | 13 · 400 | artist, counts, descriptions |
@@ -122,6 +122,20 @@ radius: art 10, chip 18, sheet 20, fab 28
 
 The art transition is the only long one. Everything the finger causes resolves
 under 300ms; the tint follows the artwork on its own schedule.
+
+### The v1 tokens still in the file, and why you must not read them as current
+
+`src/ui/theme.ts` carries twelve `@deprecated` blocks — v1 aliases in `type`,
+`space`, `size`, `radius` and `motion`, kept until the browser chrome is
+restyled. Several are imported nowhere at all: `motion.doneHold`, `pillSwap`,
+`iconCrossfade`, `breath` and `reducedPillHold`.
+
+They are a documentation hazard rather than a code one. `doneHold` is the clearest
+case: a token named for a behaviour that was deliberately removed — the FAB is no
+longer held for the length of a download — and its continued presence in the file
+put that removed behaviour back into `FLOWS.md § 5`, where it sat as a prescribed
+step. **A token existing is not evidence that anything uses it.** Grep for a
+consumer before describing one.
 
 ---
 
@@ -349,7 +363,9 @@ section when the file is actually written.
 
 **Profile** — the whole auto-download rule is one card: a switch, a play-count
 control, a Keep-as segmented control (Audio / Video / Match), and two quality
-rows. "Match" keeps audio for music pages and video for everything else.
+rows. "Match" keeps audio for music pages and video for everything else. Below
+the card, the settings rows, ending with **Sign out of YouTube** and **Export
+diagnostics** — see [the Profile rows](#profile-rows) further down.
 
 The play count is **three discrete steps (2 / 3 / 5)**, not the continuous
 slider the mock shows. The rule is discrete; a smooth track would imply that 4
@@ -405,6 +421,77 @@ sheet's *Update engine* button sent people to this screen, where nothing could b
 pressed. A sideloaded app gets no store updates, so in-place repair is the only
 path there is.
 
+### The extraction-failure sheet names the failure
+
+It used to read **"YouTube changed something — the extraction engine couldn't
+read this page. An update may already fix it."** for *every* failure there is,
+with *Update engine* as the first action.
+
+Measured with the network switched off: the app blamed YouTube for a change it
+had not made, and offered an update that needed the connection it had just
+failed to use. `readableError` had already worked out the truth — the sheet
+simply never asked for it, which is the same shape of bug as the write-only
+`notice` above.
+
+It now shows that sentence as the body, and the title only claims YouTube moved
+when a stale extractor is genuinely a candidate (`looksStale`). When it is not,
+the title is the neutral **"Couldn't read this page"**, the icon is
+`error-outline` rather than the wrench, and **the update button is absent rather
+than present and useless** — the same rule as everywhere else: a control appears
+only where it is real. Confirmed on the device: with no network the sheet reads
+*"Couldn't read this page / Couldn't reach YouTube"* and offers only *Try
+again*.
+
+**A file on the device outranks a stale verdict about it.** The FAB promoted
+`alreadySaved` to its "done" state only from `ready`, so a download that failed
+and was then rescued by *Try again* in Library left the button on that page
+still showing the amber retry icon — telling the user it failed while the file
+sat in their library. Measured on the emulator immediately after a successful
+retry. `resolving` and `working` still win, because those describe something
+happening now and the ring is the honest thing to draw; every other state is a
+claim about the past that the library has already overruled.
+
+The **Export diagnostics** row writes the app's own record of what it did — see
+[FEATURES § 16](FEATURES.md#16-diagnostics--the-flight-recorder) — to
+`Downloads/Spool` as a text file, and flashes the filename it wrote. Its value
+states the entry and error count *before* it writes, so the row says what it
+would do rather than only reporting afterwards.
+
+It is present unconditionally, unlike **Back up playlists** above it, which
+hides when there are no playlists to write. There is always a log, and the
+moment someone reaches for this is the moment something has already gone wrong
+— which is the worst possible time for a row to have hidden itself.
+
+The log leaves as a **file the user can read first**, never as a report sent
+anywhere. Spool has one server now — it signs subscription licences — and it is
+deliberately not a destination for this: it has no route that would accept a log
+and nothing in the diagnostics path can reach it. This is the one feature with
+an obvious excuse to break that commitment, and it does not.
+
+### Profile rows
+
+**Sign out of YouTube** sits between the engine row and diagnostics, with
+"Library stays" where the other rows carry a value. That word is doing work: on
+its own, "Sign out" in an app whose whole product is a local library reads as if
+it might take the library with it, and a control people are afraid of is a
+control they do not use. The value slot says what it costs before the dialog
+does.
+
+It is a plain `SettingRow`, not a red one. It is reversible by signing back in,
+so it is not in the same class as forgetting a play count — the confirmation
+carries the weight instead, and only its "Sign out" button is `destructive`.
+
+The dialog is the only place in the app that has to explain a boundary the app
+does not control, so it says both halves plainly: *"This device forgets the
+session… It does not sign you out at Google — only Google can end the session
+there, from your account's device list."* A control that promised more than it
+does would be worse than no control, because the user cannot check it.
+
+On success the app **switches to Browse** rather than staying on Profile. The
+result is the only proof available — a signed-out YouTube — and the notice strip
+draws only there. "Signed out on this device" repeats the boundary in four
+words.
+
 There is **no "Playback & network" row**. It read "Wi-Fi only" and nothing
 enforced it: the connection type needs a native probe this build does not have.
 Same rule as the meter below — the app may not assert a policy it does not run.
@@ -414,6 +501,23 @@ it needs a native `StatFs` call that does not exist yet, so today the section
 shows the library's real size as text and no bar. A meter is the one control on
 this screen that looks like a measurement, so it may never be drawn from a
 guess — an empty space is honest, a filled bar is not.
+
+### The sign-in page is not screenshottable
+
+While the browser is on a Google sign-in host the app raises FLAG_SECURE, so the
+window cannot be screenshotted, screen-recorded, or mirrored to a display that
+is not itself secure. It is dropped again the moment the page navigates away,
+and on unmount.
+
+There is deliberately **no interface for this** — no banner, no shield icon, no
+setting. The user finds out only if they try to screenshot a password field,
+which is the one time the behaviour is the answer rather than a surprise. It is
+also why the flag has to be scoped: it is per-window, and left on it would stop
+someone screenshotting their own library with nothing on screen to explain why.
+
+Note for anyone verifying it: a blocked screenshot comes back black or fails
+outright, which reads exactly like the capture tooling being broken. That is the
+expected result, not a failure of the test.
 
 ## What a row is called
 
@@ -434,7 +538,7 @@ Two things about it are visual decisions rather than parsing ones:
   attribution is the same mistake as a storage meter drawn from a guess: a fact
   the user can check, asserted by an app that does not know it.
 
-## Mini player — four states, 58dp
+## Mini player — five states, 58dp
 
 The sub-line is the **artist**, and for a long time it was the quality string —
 so every row and every notification said "audio" where a person's name belongs.
@@ -478,7 +582,7 @@ start media. The card has no such guarantee — see `PLAY_GRACE_MS` and the
 "a hidden page cannot be made to resume" rule.
 
 The page's state reaches the bar through a small store rather than screen state:
-the page reports about once a second, and re-rendering a fifteen-hundred-line
+the page reports about once a second, and re-rendering a three-thousand-line
 screen on every tick to move a 2dp line is the cost that buys.
 
 A 2dp progress line sits at the top edge, `rgba(0,0,0,.35)` track with the
@@ -588,6 +692,16 @@ promise.
 Nothing is drawn while nothing is armed. A control that only labels its own
 absence is the chrome this screen does not have.
 
+**The overflow must fit in three buttons.** Every menu here is an `Alert`, and
+Android draws at most three buttons and silently drops the rest. The player's
+overflow had four — Cancel, Remove, Add to playlist, Sleep timer — so for any
+library track the timer was never on screen and could not be armed at all; the
+playlist menu lost Rename and a mid-playlist track lost Move up the same way
+(measured on the S21 FE, 2026-09-18). All three now go through `offerMenu` in
+`BrowserScreen`: three actions drop the explicit Cancel (Back or a tap outside
+dismisses), and a fourth is logged as a bug. A menu that needs more belongs in
+a sheet.
+
 ### Continuity rules
 
 | Event | Behaviour |
@@ -687,6 +801,62 @@ Routing both the mini bar and the full player through the context restored it to
 
 ---
 
+## First run — three screens, once
+
+`screens/OnboardingScreen.tsx`. **Welcome → What it does → Premium → Browse.**
+It replaced a single `FirstRunScreen`, which is deleted rather than left in the
+tree — two first-run screens is an invitation to edit the wrong one.
+
+**Steps are driven by their buttons, not by swiping**, and the dots are a
+position indicator rather than a control. That is not a stylistic preference: a
+swipe past a legal notice is not an acknowledgement of it, and the first step's
+button is what acknowledges the legal position.
+
+| Step | Button | What it carries |
+|---|---|---|
+| Welcome | `I understand — continue` | What Spool is — no ads, no account needed (one is optional, for paying), no tracking — and the legal position, in full, above the button that accepts it |
+| What it does | `Next` | Five features, download button first. It is the only control that has ever needed explaining, because it is grey until a video is open and reads as broken otherwise |
+| Premium | `Start browsing`, with `See the offer` under it | Why a paid tier exists, and the price of exactly one offer |
+
+**The legal notice is on the first step, not the last.** It has to be adjacent
+to the button that accepts it. Putting it under a sales pitch would make
+acceptance a side effect of dismissing an offer, which is the kind of consent
+nobody would defend out loud. This is the "stated once on first run" of the copy
+rules.
+
+**`Start browsing` is the primary control on the premium step and `See the
+offer` is secondary.** The app has to be usable before it is worth paying for,
+and a first run whose loudest button is a purchase has the order backwards.
+
+**The premium step replaces the sheet that used to follow first run — it does
+not add to it.** `PreReleaseSheet` was raised the instant first run ended; with
+a premium step in front of it, that was the same person sold to twice inside ten
+seconds. Now a sheet is raised only from `See the offer`, and **which** sheet
+depends on which offer the build actually has: `PreReleaseSheet` in a trial
+build, `SubscribeSheet` in every other. One offer, one number — printing ₹249
+here and ₹399 a tap later would be two answers to the same question.
+
+**A subscriber never sees the premium step at all**, and the dots then show two,
+not three with one unreachable. A progress indicator that counts a step nobody
+will reach is a small lie of the same family as a chevron with nowhere to go.
+
+The transition is a **cross-fade, not a slide.** The steps are different lengths,
+and sliding between panels of different heights either clips the taller one or
+leaves the shorter one floating — both read as a rendering bug rather than as a
+transition.
+
+### What was removed on the way
+
+`FirstRunScreen` carried a **Choose folder** button that opened no picker. It
+called `flashNotice('Files are saved to Movies/Spool')`, and the notice strip
+only renders on Browse — so on the one screen it lived on, it did nothing at
+all. Two instances of the headline rule in one control: it did not do the thing
+it appeared to do, and what it *actually* did was invisible. Where files go is
+now a sentence in the features step, which is what the button was pretending to
+be.
+
+---
+
 ## The pre-release build
 
 A build cut for testers carries three limits — **seven days from the moment it
@@ -756,6 +926,147 @@ split is not tidiness: TypeScript ships as Hermes bytecode inside the APK it
 would be guarding, so a patched bundle would produce a UI that lies and a native
 layer that still refuses. Every limit is checked twice, and the second check is
 the one that decides.
+
+---
+
+
+## The paywall
+
+₹29 a month or ₹249 a year. It appears in **three** places and nowhere else —
+two of them permanent, one of them once ever. See
+[First run](#first-run--three-screens-once) for the third; it was two until
+onboarding landed, and the paragraph below is why the third one had to be
+argued for rather than added.
+
+**The Profile row.** Under a `Subscription` heading, directly below the identity
+block. A row rather than a banner: someone who has paid has nothing to do here
+and must not be sold to twice, and someone who has not has the sheet one tap from
+where they already are. Subscribed, it reads `Yearly plan · 214 days left` in
+`saved` green — days to **`paidThrough`**, never to the token's expiry, which is
+now a lease of a few days; `Active` when the date is not known yet. Unsubscribed,
+`Subscribe · ₹249 a year`; paid but with the lease run out offline,
+`Paid to 12 Mar 2027`, because the date is still true. The number is mono,
+because days-left is a fact the user can check — the same rule that governs the
+trial chip. Directly above it sits the **Account** row (`Sign in · Use it on
+every phone` when signed out, `Account · <email>` when in), because the
+subscription belongs to the account.
+
+**A refused save, on the FAB path only.** The notice strip still says why, and
+the sheet then offers the way out. The three *automatic* refusal paths stay
+silent and leave the video unmarked exactly as they did: a rule with no interface
+does not acquire one just because there is now something to sell.
+
+### The sheet follows the payment, step by step
+
+There is no gateway. The user pays by UPI from their own app, to the owner's UPI
+ID, and proves it with a screenshot. So the sheet is a short sequence, and each
+step says what the next one is:
+
+1. **Signed out** — one sentence on why an account is needed ("what you pay is
+   added to your Spool account, so it works on every phone you sign in on") and
+   one button that hands over to the account sheet, which hands back here.
+2. **Choose** — the two plan rows and `Continue — ₹249`. The fine line says how
+   paying works before it starts: *"You pay by UPI from your own app, then
+   upload a screenshot of the payment here."*
+3. **Pay** — the primary button `Pay ₹249 with a UPI app` first (the common
+   case is paying on this phone), then a QR of the same `upi://` link on a
+   **white** tile with a quiet zone — never tinted, because a camera in a dim
+   room does not find an artwork-coloured code — beside the UPI ID, order code
+   and amount as **selectable** mono text, for the UPI apps that refuse links
+   from other apps. The body says to pay the exact amount, put the order code in
+   the note if asked, come back and upload a screenshot — and that the
+   screenshot and its text go to Spool and nobody else. `Upload payment
+   screenshot` is the second primary; its label becomes `Reading the
+   screenshot` and then `Sending` while it works. `Start over` drops the order.
+4. **Approved** — `You are all set`, the plan and the paid-through date, and
+   *"Nothing renews on its own — pay again before that date to keep going."*
+5. **Review / rejected** — **not an error screen.** The server's reasons are
+   listed verbatim, each with a `warn` info glyph (text stays `on`; warn is never
+   a flood). Then the WhatsApp button, and copy that says plainly the screenshot
+   must be attached in WhatsApp because it cannot be attached from here. `Try
+   another screenshot` returns to step 3 on the same order.
+
+`I have already paid` sits under every pre-answer step. It forces a licence
+sync — the way a claim approved by hand reaches the phone — and, if nothing has
+come through, says so in warn text rather than closing.
+
+A subscriber sees the plan, **Paid through** (a date, mono) and days left, and
+`Pay for another period` — the renewal control that has to exist now that
+nothing renews by itself. Still no "cancel": there is nothing running to cancel.
+
+The sheet scrolls (max 92% of the screen) because the pay step, with the QR, is
+taller than a small phone.
+
+### The account sheet
+
+Same frame as every sheet. Signed out: two fields (email, password), one button,
+a text switch between *Sign in* and *Create an account* rather than two screens,
+and `Forgot password?`, which opens WhatsApp to support with a prefilled message
+— there is no reset form, because nothing on the server would send the email.
+Server refusals are rewritten as sentences (`That email and password do not
+match.`), never shown as the server's own strings. Signed in: the email as the
+title, the paid-through date in mono, the device list (a phone glyph, `accent`
+for this phone, label, city · last seen in `mute` mono), and `Sign out` with the
+line *"Signing out removes the subscription from this phone until you sign in
+again. Your library stays."* Blocked: the explanation and a WhatsApp button,
+nothing else.
+
+### The play-lock sheet
+
+The smallest sheet in the app: a title, one sentence, `Play here instead`, and
+`Not now` / `OK`. It is a sheet rather than the notice strip because the strip
+draws only on Browse and this can happen on any tab, or while the app was in the
+background — in which case it is waiting when the user returns. Three texts:
+*Playing on Pixel 8* (a start was refused), *Playback moved to Pixel 8* (a
+heartbeat found the account playing elsewhere, and this phone paused), and *You
+are offline — Connect to the internet to keep playing on this account* (no
+server contact for over a day; no takeover button, since there is nothing to
+take over from).
+
+The offline text is the one place a network condition gets a sheet, against the
+"no dialogs for network failure" rule below — deliberately. It is not reporting
+a failure; it is the answer to a play button that otherwise did nothing, and a
+silent no-op is the worse breach (the "no control that does not do the thing it
+appears to do" rule). It appears only after a full day without contact, only
+signed in, and only on a *start* — a track already playing is never interrupted
+for it.
+
+### Pricing copy is held to the same standard as everything else
+
+`₹249 a year`, noted as `Works out at ₹20.75 a month. Paid once, by UPI.`;
+`₹29 a month`, noted as `Pay each month by UPI. Nothing renews on its own.` The
+₹20.75 figure is arithmetic on a price that is actually charged, and may be
+printed. Nothing may imply a renewal that does not happen — "cancel any time",
+"autopay" and "mandate" are pinned out by a test. What may not be printed
+is a struck-through number nobody has been charged — the identical rule that
+keeps the pre-release sheet from striking through ₹999, and it is pinned by a
+test in `tests/license.test.mjs` rather than left to memory.
+
+### A subscriber is never shown the pre-release pitch
+
+The boot effect raises `PreReleaseSheet` only when `!licence().entitled`. Someone
+who has paid is not a tester, and a sales pitch to an existing customer is the
+clearest possible signal that an app is not paying attention.
+
+### What is deliberately absent
+
+- **No "manage" or "cancel subscription" button.** Nothing renews, so there is
+  nothing to cancel; the only control is paying for another period.
+- **No countdown and no dunning banner.** The Profile row states the days and
+  that is the whole of it.
+- **No interstitial — with one exception, added deliberately and bounded.** The
+  premium step of first run is an interstitial by any honest reading, and this
+  line used to forbid it outright. It was added because a product with nothing
+  to sell on the way in leaves most people never learning there is a paid tier
+  at all. What keeps it from becoming the thing this rule was written against:
+  it happens **once ever**, it is not the loudest control on its own screen,
+  it cannot block entry to the app, and a subscriber never sees it. If a second
+  interstitial is ever proposed, this is the paragraph to re-read — the
+  exception is the whole of the permission, not a precedent.
+- **Nothing already saved is ever taken back**, and both the sheet and the
+  refusal copy say so. It is true — the files are in `Music/Spool` and the app
+  has no path that deletes them on a lapse — and it is the single thing most
+  likely to be assumed otherwise.
 
 ---
 
@@ -885,10 +1196,18 @@ and no amount of looking at the code would have.
 **The guarantee is measured, not assumed.** `tintFromDominant` computes the WCAG
 ratio and lifts `on`/`onDim` in 4% steps if either falls short. Swept over 1805
 sampled colours — every hue at five saturations and five lightnesses, plus pure
-black, white and greys — the worst ratios are **13.55** for `on`/`deep`, **6.80**
-for `onDim`/`deep`, and **5.86** for `onAccent`/`accent`, against a 4.5 floor and
-zero failures. The hand-checked fixtures sit at 14.68 / 7.21 / 10.07, so generated
-tints land in the same band as the ones a person chose.
+black, white and greys — **zero fail the 4.5 floor**, and the worst case is
+around **13.5** for `on`/`deep`, **6.6** for `onDim`/`deep` and **5.9** for
+`onAccent`/`accent`. The hand-checked fixtures sit at 14.68 / 7.21 / 10.07, so
+generated tints land in the same band as the ones a person chose.
+
+The figures are given to one decimal on purpose. The sweep script is not in the
+repo, and three independent re-runs against a 1805-sample grid agreed exactly on
+`on`/`deep` (13.55) while returning 6.59, 6.68 and 6.80 for `onDim`/`deep` — the
+spread is the grid's exact saturation and lightness steps, not the code's. The
+part that is load-bearing and does reproduce every time is the one that matters:
+**no sampled colour fails.** If you need the precise worst case, re-derive it and
+commit the script alongside the number.
 
 **Where the image comes from**, in order of honesty:
 
@@ -986,9 +1305,17 @@ device.
 
 ### FAB sheet
 
-Three picks and a door to the rest ("All 14 formats"). The Profile default is
-**labelled** ("your default") rather than pre-selected, so the tap is always
-deliberate.
+Three picks and a door to the rest. **As built**, the door reads `More…`
+(`QualitySheet.tsx:301`) and the expanded view is headed `All formats`
+(`:324`) — no count, and no marking of which pick is the Profile default.
+
+The design asks for two things the code does not do: a count on the door ("All
+14 formats"), and the Profile default **labelled** rather than pre-selected, so
+that the tap stays deliberate. Both were recorded as book drift in
+[RELIABILITY.md § 4](RELIABILITY.md#4-book-drift) and are still open. This entry
+now describes what ships; the design intent above is the outstanding work, and
+the count is the cheaper half — `rows.length` is already in hand at the call
+site.
 
 ### Nothing is downloaded twice by accident
 
@@ -1063,9 +1390,10 @@ evidence.
 
 - "Saved automatically" / "You saved this" — the only trace of the rule
 - "the cloud is never searched without a tap"
-- Legal position stated once on first run and again under Profile: built for
-  your own uploads, Creative Commons and public-domain material, and personal
-  offline use where local law allows it.
+- Legal position stated once on first run — the **first** step of onboarding,
+  above the button that accepts it — and again under Profile: built for your own
+  uploads, Creative Commons and public-domain material, and personal offline use
+  where local law allows it.
 
 ## What the design deliberately does not do
 

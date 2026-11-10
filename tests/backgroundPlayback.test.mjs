@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { useBackgroundPlayback } from '../src/browser/useBackgroundPlayback.ts';
 import { releaseNowPlaying, publishNowPlaying } from '../src/player/nowPlaying.ts';
 import { pagePlayback, setPagePlayback } from '../src/browser/pageNowPlaying.ts';
+import { refreshLicence } from '../src/core/license.ts';
 import { mount } from './harness/stubs/react.mjs';
 import * as native from './harness/stubs/expo-modules-core.mjs';
 import { setAppState, reset as resetAppState } from './harness/stubs/react-native.mjs';
@@ -49,6 +50,14 @@ const media = (over = {}) => ({
 });
 
 function setup(options = {}) {
+  native.handlers.licenceStatus = () => ({
+    entitled: options.entitled ?? true,
+    expiresAt: 1_800_000_000_000,
+    plan: 'monthly',
+    device: 'd1',
+    server: '',
+  });
+  refreshLicence();
   const injected = [];
   const saved = [];
   const webview = { current: { injectJavaScript: (script) => injected.push(script) } };
@@ -260,6 +269,14 @@ describe('talking to the page', () => {
     setAppState('background');
     assert.match(injected.at(-1), /setBackground\(true\)/);
     setAppState('active');
+    assert.match(injected.at(-1), /setBackground\(false\)/);
+  });
+
+  test('backgrounding while not entitled pauses the video and drops background playback', () => {
+    const { api, injected } = setup({ entitled: false });
+    api().onMedia(media({ playing: true }));
+    setAppState('background');
+    assert.ok(injected.some((s) => s.includes('pause()')), 'must inject pause()');
     assert.match(injected.at(-1), /setBackground\(false\)/);
   });
 

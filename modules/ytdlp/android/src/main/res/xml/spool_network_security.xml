@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The release policy: no cleartext, to anywhere, ever.
+
+  This is what the platform already defaults to at this targetSdk, so the file
+  looks redundant and is not. Stating it explicitly is what stops a future
+  manifest merge — a library, an SDK, an Expo config plugin — from quietly
+  re-enabling `usesCleartextTraffic` on the application element and downgrading
+  every request the app makes without anyone noticing. A default can be
+  overridden by a merge; a declaration wins it.
+
+  The debug variant of this same file (src/debug/res/xml/) permits cleartext, so
+  a licence server running on Laragon over plain HTTP can be tested against. The
+  two files must keep the same name: the debug source set replaces this one
+  wholesale, and a rename would silently give debug builds the release policy
+  back.
+-->
+<network-security-config>
+  <base-config cleartextTrafficPermitted="false">
+    <trust-anchors>
+      <certificates src="system" />
+    </trust-anchors>
+  </base-config>
+</network-security-config>

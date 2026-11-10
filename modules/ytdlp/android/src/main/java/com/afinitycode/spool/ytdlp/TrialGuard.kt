@@ -31,6 +31,7 @@ object TrialGuard {
   private const val PREFS = "spool_trial"
   private const val KEY_SAVES = "saves"
   private const val KEY_SEEN = "seen"
+  private const val KEY_INSTALLED = "installed"
 
   /**
    * A rollback smaller than this is a time zone, a DST change or an NTP
@@ -39,7 +40,7 @@ object TrialGuard {
   private const val CLOCK_SLACK_MS = 26L * 60 * 60 * 1000
 
   val enabled: Boolean get() = BuildConfig.TRIAL
-  val expiresAt: Long get() = BuildConfig.TRIAL_EXPIRES_AT
+  val trialDays: Long get() = runCatching { BuildConfig.TRIAL_DAYS }.getOrDefault(7L)
   val maxDownloads: Int get() = BuildConfig.TRIAL_MAX_DOWNLOADS
   val maxSeconds: Int get() = BuildConfig.TRIAL_MAX_SECONDS
 
@@ -61,16 +62,46 @@ object TrialGuard {
       File(dir, ".spool")
     }.getOrNull()
 
-  private fun readMirror(context: Context): Pair<Int, Long> {
-    val file = mirror(context) ?: return 0 to 0L
+  private fun readMirror(context: Context): Triple<Int, Long, Long> {
+    val file = mirror(context) ?: return Triple(0, 0L, 0L)
     return runCatching {
       val parts = file.readText().trim().split(':')
-      (parts.getOrNull(0)?.toIntOrNull() ?: 0) to (parts.getOrNull(1)?.toLongOrNull() ?: 0L)
-    }.getOrDefault(0 to 0L)
+      Triple(
+        parts.getOrNull(0)?.toIntOrNull() ?: 0,
+        parts.getOrNull(1)?.toLongOrNull() ?: 0L,
+        parts.getOrNull(2)?.toLongOrNull() ?: 0L,
+      )
+    }.getOrDefault(Triple(0, 0L, 0L))
   }
 
-  private fun writeMirror(context: Context, saves: Int, seen: Long) {
-    runCatching { mirror(context)?.writeText("$saves:$seen") }
+  private fun writeMirror(context: Context, saves: Int, seen: Long, installed: Long) {
+    runCatching { mirror(context)?.writeText("$saves:$seen:$installed") }
+  }
+
+  fun installedAt(context: Context): Long {
+    val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    val fromPrefs = prefs.getLong(KEY_INSTALLED, 0L)
+    val fromMirror = readMirror(context).third
+    val early = when {
+      fromPrefs > 0L && fromMirror > 0L -> minOf(fromPrefs, fromMirror)
+      fromPrefs > 0L -> fromPrefs
+      fromMirror > 0L -> fromMirror
+      else -> {
+        val now = System.currentTimeMillis()
+        prefs.edit().putLong(KEY_INSTALLED, now).apply()
+        writeMirror(context, used(context), highWater(context), now)
+        now
+      }
+    }
+    if (fromPrefs == 0L) {
+      prefs.edit().putLong(KEY_INSTALLED, early).apply()
+    }
+    return early
+  }
+
+  fun expiresAt(context: Context): Long {
+    val first = installedAt(context)
+    return first + trialDays * 24L * 60 * 60 * 1000L
   }
 
   /** How many saves this install has spent, whichever store remembers more. */
@@ -87,7 +118,7 @@ object TrialGuard {
     val next = used(context) + 1
     val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     prefs.edit().putInt(KEY_SAVES, next).apply()
-    writeMirror(context, next, highWater(context))
+    writeMirror(context, next, highWater(context), installedAt(context))
   }
 
   /**
@@ -100,7 +131,7 @@ object TrialGuard {
     val seen = maxOf(prefs.getLong(KEY_SEEN, 0L), readMirror(context).second)
     if (now > seen) {
       prefs.edit().putLong(KEY_SEEN, now).apply()
-      writeMirror(context, used(context), now)
+      writeMirror(context, used(context), now, installedAt(context))
       return now
     }
     return seen
@@ -113,7 +144,7 @@ object TrialGuard {
   fun expired(context: Context): Boolean {
     if (!enabled) return false
     val now = System.currentTimeMillis()
-    if (now >= expiresAt) return true
+    if (now >= expiresAt(context)) return true
     // Before the build existed is not a date this build can be running on.
     if (now < BuildConfig.BUILT_AT - CLOCK_SLACK_MS) return true
     return now < highWater(context) - CLOCK_SLACK_MS
@@ -167,7 +198,7 @@ object TrialGuard {
   /** Everything the app's own screens need to describe the trial. */
   fun status(context: Context): Map<String, Any?> = mapOf(
     "trial" to enabled,
-    "expiresAt" to expiresAt.toDouble(),
+    "expiresAt" to expiresAt(context).toDouble(),
     "expired" to expired(context),
     "intact" to intact(context),
     "used" to used(context),

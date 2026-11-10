@@ -2,6 +2,8 @@ import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import * as native from './harness/stubs/expo-modules-core.mjs';
+import * as storage from './harness/stubs/async-storage.mjs';
+import { clientLost, resetClientScores } from '../src/core/clients.ts';
 import { bestAudio, kbpsFromQuality } from '../src/browser/formatView.ts';
 
 /**
@@ -21,21 +23,68 @@ import { bestAudio, kbpsFromQuality } from '../src/browser/formatView.ts';
 let counter = 0;
 const load = () => import(`../src/core/ytdlp.ts?fresh=${counter++}`);
 
-beforeEach(native.reset);
+/**
+ * The scoreboard is deliberately *not* re-imported per case.
+ *
+ * It is the one piece of the walk that is meant to outlive a session, so the
+ * cache-buster above cannot reach it — `ytdlp.ts` gets a fresh copy and shares
+ * one `clients.ts` with every other copy, exactly as the app does across a
+ * launch. Which means it has to be reset by hand, or the second test in this
+ * file runs against a chain the first one taught.
+ */
+beforeEach(() => {
+  native.reset();
+  storage.reset();
+  resetClientScores();
+});
 
-const CHAIN = ['android_vr', 'tv', 'ios', 'web', null];
+/**
+ * The order the app walks when it holds no PO token, mirroring OPEN_CHAIN.
+ *
+ * It follows yt-dlp's published requirement table rather than a hunch: `tv`
+ * needs no token at all, yt-dlp's own default is maintained weekly by people
+ * watching this change, and `android_vr` is *last* because since 2026 it serves
+ * only format 18 without a GVS token -- which is exactly the degraded manifest
+ * that made downloads look broken.
+ */
+const CHAIN = ['tv', null, 'web_embedded', 'mweb', 'android_vr'];
+
+/** The order walked when a token IS held -- it has to name its own client. */
+const TOKEN_CHAIN = ['mweb', 'web'];
 
 const blocked = () => Object.assign(new Error('HTTP Error 403: Forbidden'), { code: 'E_LIST' });
 
-/** yt-dlp's own output, trimmed to the fields the parser reads. */
+/**
+ * yt-dlp's own output, trimmed to the fields the parser reads.
+ *
+ * The default manifest is deliberately *healthy* — one adaptive video rung and
+ * one audio-only rung, which is the shape every real YouTube answer has. It
+ * used to default to `formats: []`, and that quietly made these tests agree
+ * with a bug: the walk now judges an answer as well as catching a throw, and a
+ * successful extraction that returns nothing at all is a refusal wearing a
+ * success, not the "first client that answers".
+ *
+ * Pass `formats` explicitly to describe a degraded one.
+ */
 const payload = (over = {}) =>
   JSON.stringify({
     id: 'dQw4w9WgXcQ',
     title: 'A song',
     channel: 'A channel',
     duration: 212,
-    formats: [],
+    formats: [
+      { format_id: '137', ext: 'mp4', vcodec: 'avc1.640028', acodec: 'none', height: 1080 },
+      { format_id: '140', ext: 'm4a', vcodec: 'none', acodec: 'mp4a.40.2', abr: 128 },
+    ],
     ...over,
+  });
+
+/** What a client serving a degraded response hands back: muxed only, no audio. */
+const thinPayload = () =>
+  payload({
+    formats: [
+      { format_id: '18', ext: 'mp4', vcodec: 'avc1.42001E', acodec: 'mp4a.40.2', height: 360 },
+    ],
   });
 
 const ref = { videoId: 'dQw4w9WgXcQ', url: 'https://m.youtube.com/watch?v=dQw4w9WgXcQ', title: 'A song' };
@@ -47,30 +96,30 @@ describe('the client walk', () => {
   test('stops at the first client that answers', async () => {
     const { listFormats } = await load();
     await listFormats(ref);
-    assert.deepEqual(clientsTried(), ['android_vr']);
+    assert.deepEqual(clientsTried(), ['tv'], 'tv leads: it needs no PO token');
   });
 
   test('walks the whole chain past a refusal', async () => {
     native.handlers.listFormats = async (_url, _pot, _vd, client) => {
-      if (client !== 'web') throw blocked();
+      if (client !== 'mweb') throw blocked();
       return payload();
     };
     const { listFormats } = await load();
     const meta = await listFormats(ref);
-    assert.deepEqual(clientsTried(), ['android_vr', 'tv', 'ios', 'web']);
+    assert.deepEqual(clientsTried(), ['tv', null, 'web_embedded', 'mweb']);
     assert.equal(meta.title, 'A song');
   });
 
   test('remembers what worked, so the next call does not walk again', async () => {
     native.handlers.listFormats = async (_url, _pot, _vd, client) => {
-      if (client !== 'ios') throw blocked();
+      if (client !== 'web_embedded') throw blocked();
       return payload();
     };
     const { listFormats } = await load();
     await listFormats(ref);
     native.calls.length = 0;
     await listFormats(ref);
-    assert.deepEqual(clientsTried(), ['ios'], 'the working client is tried first');
+    assert.deepEqual(clientsTried(), ['web_embedded'], 'the working client is tried first');
   });
 
   test('a client with nothing usable is a refusal, not an answer', async () => {
@@ -84,42 +133,193 @@ describe('the client walk', () => {
         { code: 'E_LIST' },
       );
     native.handlers.listFormats = async (_url, _pot, _vd, client) => {
-      if (client !== 'web') throw empty();
+      if (client !== 'mweb') throw empty();
       return payload();
     };
 
     const { listFormats } = await load();
     await listFormats(ref);
-    assert.deepEqual(clientsTried(), ['android_vr', 'tv', 'ios', 'web']);
+    assert.deepEqual(clientsTried(), ['tv', null, 'web_embedded', 'mweb']);
+  });
+
+  test('a degraded manifest is not the answer, however successfully it arrives', async () => {
+    // The failure this whole judgement exists for, measured on the phone: with
+    // no PO token, `android_vr` answered with one muxed 360p and nothing else.
+    // Nothing threw, so the walk stopped there and pinned it for the session —
+    // and `bestAudio` then found no audio-only stream and the replay rule gave
+    // up without a word, on a manifest three untried clients could have fixed.
+    native.handlers.listFormats = async (_url, _pot, _vd, client) =>
+      client === 'web_embedded' ? payload() : thinPayload();
+
+    const { listFormats } = await load();
+    const meta = await listFormats(ref);
+
+    assert.deepEqual(clientsTried(), ['tv', null, 'web_embedded']);
+    assert.ok(
+      meta.formats.some((f) => f.kind === 'audio'),
+      'the client that had a real manifest is the one that won',
+    );
+  });
+
+  test('a whole chain of degraded manifests still yields the best one on offer', async () => {
+    // Judging harshly is only safe because being wrong costs time rather than a
+    // download. A thin manifest still has a stream in it, and a stream is what
+    // the user asked for.
+    native.handlers.listFormats = async () => thinPayload();
+    native.handlers.updateEngine = async () => {
+      throw new Error('offline');
+    };
+
+    const { listFormats } = await load();
+    const meta = await listFormats(ref);
+
+    assert.deepEqual(meta.formats.map((f) => f.id), ['18']);
+    assert.equal(clientsTried().length, CHAIN.length, 'every client was asked first');
+  });
+
+  test('an empty manifest is a refusal wearing a success', async () => {
+    native.handlers.listFormats = async (_url, _pot, _vd, client) =>
+      client === null ? payload() : payload({ formats: [] });
+
+    const { listFormats } = await load();
+    await listFormats(ref);
+    assert.deepEqual(clientsTried(), ['tv', null]);
+  });
+
+  test('a degraded answer is not remembered as the client that worked', async () => {
+    // `preferredClient` is what stops the next call walking again, so pinning a
+    // client that only ever answered thinly would make one bad response the
+    // whole session's ceiling.
+    let thin = true;
+    native.handlers.listFormats = async (_url, _pot, _vd, client) => {
+      if (thin) return thinPayload();
+      return client === 'mweb' ? payload() : thinPayload();
+    };
+
+    const { listFormats } = await load();
+    await listFormats(ref);
+    thin = false;
+    native.calls.length = 0;
+    await listFormats(ref);
+
+    assert.ok(
+      (await listFormats(ref)).formats.some((f) => f.kind === 'audio'),
+      'a later call can still find a client that answers properly',
+    );
   });
 
   test('a remembered client that stops working is not tried twice in one walk', async () => {
-    let allow = 'ios';
+    let allow = 'web_embedded';
     native.handlers.listFormats = async (_url, _pot, _vd, client) => {
       if (client !== allow) throw blocked();
       return payload();
     };
     const { listFormats } = await load();
     await listFormats(ref);
-    allow = 'tv';
+    allow = null;
     native.calls.length = 0;
     await listFormats(ref);
-    assert.deepEqual(clientsTried(), ['ios', 'android_vr', 'tv']);
+
+    const walk = clientsTried();
+    assert.equal(walk[0], 'web_embedded', 'the remembered one leads');
+    assert.equal(walk.filter((c) => c === 'web_embedded').length, 1, 'and is not asked twice');
+    assert.equal(walk.at(-1), null, 'the walk still reaches the one that answers');
+    // `tv` and `null` come *after* `mweb` and `android_vr` here, which is the
+    // scoreboard at work rather than the base order: both refused during the
+    // first walk a moment ago, so they have sunk below the two clients this
+    // session has no opinion about. See src/core/clients.ts.
+    assert.deepEqual(walk, ['web_embedded', 'mweb', 'android_vr', 'tv', null]);
   });
 
-  test('a token pins the request, so there is nothing to walk', async () => {
-    // A PO token pins the request to the web client, so walking the chain would
-    // repeat the identical request five times.
+  test('a token narrows the walk to the clients it could belong to', async () => {
+    // A token is minted by a platform and only validates there, so holding one
+    // removes most of the choice -- but not all of it. Ours comes from
+    // m.youtube.com, which is `mweb`; `web` is the near neighbour. Walking the
+    // two is what makes the pairing measured rather than asserted.
     const { listFormats } = await load();
     await listFormats(ref, { poToken: 'abc', visitorData: 'def' });
-    assert.deepEqual(clientsTried(), [null]);
+    assert.deepEqual(clientsTried(), ['mweb']);
     assert.deepEqual(native.callsTo('listFormats')[0].slice(1, 3), ['abc', 'def']);
+  });
+
+  test('a token whose first client is refused falls to the other', async () => {
+    native.handlers.listFormats = async (_url, _pot, _vd, client) => {
+      if (client !== 'web') throw blocked();
+      return payload();
+    };
+    const { listFormats } = await load();
+    await listFormats(ref, { poToken: 'abc' });
+    assert.deepEqual(clientsTried(), TOKEN_CHAIN);
+  });
+
+  test('a token that is refused everywhere falls back to walking without it', async () => {
+    /**
+     * The one thing a token must never do is make the app worse than not
+     * having one.
+     *
+     * Holding one narrows the walk to the two clients that could have minted
+     * it, so a token that is expired, bound to another video, or simply the
+     * wrong context leaves two chances where a tokenless request would have had
+     * five. Harvesting became reliable long before it became *correct* -- the
+     * page hands over what it sent to /youtubei/v1/player, and whether that
+     * validates for the media fetch is not something the app can know in
+     * advance -- so the walk has to be able to put it down again.
+     */
+    const seen = [];
+    native.handlers.listFormats = async (_url, poToken, _vd, client) => {
+      seen.push({ client, spent: !!poToken });
+      if (poToken) throw blocked();
+      if (client !== 'web_embedded') throw blocked();
+      return payload();
+    };
+
+    const { listFormats } = await load();
+    const meta = await listFormats(ref, { poToken: 'abc', visitorData: 'def' });
+
+    assert.equal(meta.title, 'A song', 'the download still happens');
+    assert.deepEqual(
+      seen.filter((s) => s.spent).map((s) => s.client),
+      TOKEN_CHAIN,
+      'the token chain is walked first, with the token',
+    );
+    assert.deepEqual(
+      seen.filter((s) => !s.spent).map((s) => s.client),
+      ['tv', null, 'web_embedded'],
+      'then the open chain, with the token put down',
+    );
+  });
+
+  test('the fallback leg does not re-offer the token', async () => {
+    // Sending it again would just repeat the same refusal three more times.
+    native.handlers.listFormats = async (_url, poToken) => {
+      if (poToken) throw blocked();
+      return payload();
+    };
+    const { listFormats } = await load();
+    await listFormats(ref, { poToken: 'abc', visitorData: 'def' });
+
+    const spent = native.callsTo('listFormats').filter(([, pot]) => pot);
+    assert.equal(spent.length, TOKEN_CHAIN.length);
+    // visitorData goes with it. On its own it pins the request to a session we
+    // hold no attestation for, which is worse than being anonymous.
+    const open = native.callsTo('listFormats').filter(([, pot]) => !pot);
+    assert.ok(open.every(([, , vd]) => !vd));
+  });
+
+  test('the tokened and tokenless walks do not share a remembered client', async () => {
+    // A client pinned while tokenless means something different, or nothing at
+    // all, on a request that carries a token.
+    const { listFormats } = await load();
+    await listFormats(ref);
+    native.calls.length = 0;
+    await listFormats(ref, { poToken: 'abc' });
+    assert.deepEqual(clientsTried(), ['mweb'], 'not the tokenless favourite');
   });
 
   test('visitorData without a token still walks', async () => {
     const { listFormats } = await load();
     await listFormats(ref, { visitorData: 'def' });
-    assert.deepEqual(clientsTried(), ['android_vr']);
+    assert.deepEqual(clientsTried(), ['tv']);
   });
 });
 
@@ -132,6 +332,11 @@ describe('what counts as a refusal', () => {
       'Failed to extract any player response',
       'Precondition check failed',
       'Video unavailable',
+      // Both measured on a release build, not guessed. The first stopped the
+      // walk on the second client of five while `ios`, `web` and the default
+      // went untried; the second is the same shape.
+      'ERROR: [youtube] abc: The page needs to be reloaded.',
+      'nsig extraction failed: Some formats may be missing',
     ]) {
       native.reset();
       let asked = 0;
@@ -181,7 +386,7 @@ describe('self-repair', () => {
     await listFormats(ref);
     assert.equal(native.callsTo('updateEngine').length, 1);
     assert.equal(clientsTried().length, CHAIN.length + 1);
-    assert.equal(clientsTried()[CHAIN.length], 'android_vr', 'the chain restarts from the top');
+    assert.equal(clientsTried()[CHAIN.length], 'tv', 'the chain restarts from the top');
   });
 
   test('only once per session — it is a network call', async () => {
@@ -438,9 +643,66 @@ describe('starting a download', () => {
       [
         '137+bestaudio/bestvideo+bestaudio/best',
         '18/bestvideo+bestaudio/best',
-        '140/bestaudio',
+        // The audio branch ends in `/best` so it cannot name nothing: a
+        // degraded manifest has no `bestaudio` rung to fall back to, and `-x`
+        // extracts the audio from whatever `best` resolves to.
+        '140/bestaudio/best',
       ],
     );
+  });
+
+  test('two attempts at the same video and quality write the same file', async () => {
+    /**
+     * The whole of resumability is this one property.
+     *
+     * Downloads used to be named for the job id, which is minted per attempt,
+     * so yt-dlp never had a partial file to continue into: a 141 MB save
+     * interrupted at 90% began again at 0%, every time, on exactly the sort of
+     * connection that had already proved it would interrupt one.
+     */
+    const { startDownload } = await load();
+    const audio = { id: '140', kind: 'audio', container: 'm4a', codec: 'aac', muxed: false };
+
+    await startDownload({ id: 'first', ref, format: audio, audioOnly: true }, () => {}).promise;
+    await startDownload({ id: 'retry', ref, format: audio, audioOnly: true }, () => {}).promise;
+
+    const keys = native.callsTo('download').map(([args]) => args.resumeKey);
+    assert.deepEqual(keys, ['dQw4w9WgXcQ.a', 'dQw4w9WgXcQ.a']);
+  });
+
+  test('a different quality is a different file', async () => {
+    // A `.part` belongs to one format, so resuming a 720p body into a file
+    // opened for 1080p would produce a corrupt one. Splitting the key by what
+    // was asked for means an attempt can only ever continue something that
+    // wanted the same thing.
+    const { startDownload, partialKey } = await load();
+    const audio = { id: '140', kind: 'audio', container: 'm4a', codec: 'aac', muxed: false };
+    const hd = { id: '137', kind: 'video', container: 'mp4', codec: 'h264', muxed: false, height: 1080 };
+    const sd = { ...hd, id: '136', height: 720 };
+
+    await startDownload({ id: 'a', ref, format: audio, audioOnly: true }, () => {}).promise;
+    await startDownload({ id: 'b', ref, format: hd, audioOnly: false }, () => {}).promise;
+    await startDownload({ id: 'c', ref, format: sd, audioOnly: false }, () => {}).promise;
+
+    const keys = native.callsTo('download').map(([args]) => args.resumeKey);
+    assert.deepEqual(keys, ['dQw4w9WgXcQ.a', 'dQw4w9WgXcQ.v1080', 'dQw4w9WgXcQ.v720']);
+    assert.equal(new Set(keys).size, 3);
+
+    // The intent decides, not the format that was picked: `bestAudio` falls
+    // back to a *muxed* stream when the manifest has no audio-only rung, and
+    // reading the kind back off that would file an audio save under a video
+    // key -- and quietly stop it resuming the audio attempt before it.
+    assert.equal(partialKey('dQw4w9WgXcQ', true, { ...hd, muxed: true }), 'dQw4w9WgXcQ.a');
+  });
+
+  test('the key is a filename, so it is built like one', async () => {
+    // It becomes a path. A YouTube id is already in this alphabet, which is the
+    // reason to filter rather than a reason not to.
+    const { partialKey } = await load();
+    const audio = { id: '140', kind: 'audio', container: 'm4a', codec: 'aac', muxed: false };
+    assert.equal(partialKey('../../etc/passwd', true, audio), 'etcpasswd.a');
+    assert.equal(partialKey('', true, audio), 'video.a');
+    assert.ok(partialKey('x'.repeat(400), true, audio).length < 40, 'and it stays short');
   });
 
   test('every id is followed by a description of what it was', async () => {
@@ -460,8 +722,11 @@ describe('starting a download', () => {
     const [asked, askedVideo] = native.callsTo('download').map(([args]) => args.format);
     // The exact stream is still asked for first; the rest is what any client can
     // satisfy, capped at what was chosen rather than demanding it.
-    assert.equal(asked, '140/bestaudio[abr<=130]/bestaudio');
-    assert.equal(askedVideo, '137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]');
+    assert.equal(asked, '140/bestaudio[abr<=130]/bestaudio/best');
+    assert.equal(
+      askedVideo,
+      '137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+    );
   });
 
   test('progress for another job is not this job\'s progress', async () => {
@@ -538,5 +803,50 @@ describe('starting a download', () => {
       () => {},
     ).promise;
     assert.equal(native.callsTo('download')[0][0].seconds, 4200);
+  });
+});
+
+/**
+ * The two session controls are one-line pass-throughs, and that is the point:
+ * every native call in the app goes through `src/core/ytdlp.ts` so there is one
+ * file that knows what the native side is. These pin the names, because the
+ * failure mode of a rename is a control that silently does nothing — a sign-out
+ * button that leaves the user signed in, or a password field that is quietly
+ * screen-recordable.
+ */
+describe('session controls', () => {
+  beforeEach(() => {
+    native.calls.length = 0;
+  });
+
+  test('signing out reaches the bridge', async () => {
+    const { signOutOfYouTube } = await load();
+    await signOutOfYouTube();
+    assert.deepEqual(
+      native.calls.map((c) => c.method),
+      ['signOutOfYouTube'],
+    );
+  });
+
+  test('the secure-window flag is passed through as given', async () => {
+    const { setSecureWindow } = await load();
+    setSecureWindow(true);
+    setSecureWindow(false);
+    assert.deepEqual(native.calls, [
+      { method: 'setSecureWindow', args: [true] },
+      { method: 'setSecureWindow', args: [false] },
+    ]);
+  });
+
+  test('setScreenOrientation forwards orientation to native bridge', async () => {
+    const { setScreenOrientation } = await load();
+    setScreenOrientation('landscape');
+    setScreenOrientation('portrait');
+    setScreenOrientation('unspecified');
+    assert.deepEqual(native.calls, [
+      { method: 'setScreenOrientation', args: ['landscape'] },
+      { method: 'setScreenOrientation', args: ['portrait'] },
+      { method: 'setScreenOrientation', args: ['unspecified'] },
+    ]);
   });
 });

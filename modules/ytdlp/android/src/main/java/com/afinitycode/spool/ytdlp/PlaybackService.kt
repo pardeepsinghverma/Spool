@@ -17,6 +17,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.util.Log
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -90,6 +91,15 @@ class PlaybackService : Service() {
     const val EXTRA_PREVIOUS = "canPrevious"
     const val EXTRA_SAVE = "canSave"
 
+    /**
+     * Set on a SHOW sent with `startForegroundService`, and only there: that
+     * start owes a `startForeground`, and the service cannot otherwise tell
+     * which of its starts did.
+     */
+    private const val EXTRA_OWED = "owed"
+
+    private const val TAG = "SpoolPlayback"
+
     private const val CHANNEL = "playback"
     private const val NOTIFICATION_ID = 4712
 
@@ -135,12 +145,44 @@ class PlaybackService : Service() {
         putExtra(EXTRA_PREVIOUS, canPrevious)
         putExtra(EXTRA_SAVE, canSave)
       }
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        context.startForegroundService(intent)
-      } else {
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
         context.startService(intent)
+        return
       }
+      /**
+       * Only a raise is a `startForegroundService`; a refresh to a card that is
+       * already up is a plain `startService`.
+       *
+       * The difference is the whole of this app's worst crash. Each
+       * `startForegroundService` is a debt — Android kills the process,
+       * uncatchably, if the service is stopped, or is not foreground when the
+       * start is delivered and does not call `startForeground` in time — and
+       * this runs on every track change, pause and seek. And the service can
+       * lose foreground without being told: for an app the user has
+       * battery-restricted, Android demotes it the moment the screen goes off
+       * (measured on the S21 FE: `STOP_FOREGROUND` 0.5s after the screen,
+       * our card still up, nothing of ours having asked). Every refresh after
+       * that owed a call the service believed it had already made — which is
+       * the crash, "after a song or two".
+       *
+       * A plain start owes nothing, whatever state the service is in. It is
+       * refused only when the app is truly in the background with no service
+       * running; then this falls back to the foreground start, marked as owed,
+       * and the service answers it before anything else.
+       */
+      if (live && runCatching { context.startService(intent) }.isSuccess) return
+      intent.putExtra(EXTRA_OWED, true)
+      context.startForegroundService(intent)
     }
+
+    /**
+     * Whether an instance is up with a card described. Written only by that
+     * instance, read from the JS thread by `show`. It says nothing about
+     * foreground state — the system changes that without telling us, which is
+     * why `publish` asks rather than remembers.
+     */
+    @Volatile
+    private var live = false
 
     fun stop(context: Context) {
       runCatching {
@@ -163,7 +205,28 @@ class PlaybackService : Service() {
   private var canNext: Boolean = false
   private var canPrevious: Boolean = false
   private var canSave: Boolean = false
+
+  /**
+   * What the last check found — foreground or not. Only for noticing a
+   * demotion in the log and as the pre-Q answer; nothing else decides on it,
+   * because the system can change it between two publishes without a word.
+   * `isForegroundNow` is the truth.
+   *
+   * It used to be the truth by assumption, set even when `startForeground`
+   * threw, so after a refused start or a system demotion every later SHOW took
+   * the `notify` path while arriving through `startForegroundService`.
+   */
   private var started: Boolean = false
+
+  /** Whether a SHOW has described something since the last teardown. */
+  private var shown: Boolean = false
+    set(value) {
+      field = value
+      live = value
+    }
+
+  /** The newest start this instance has been handed. See `teardown`. */
+  private var lastStartId: Int = 0
 
   /** The cover the caller last asked for, and the one actually decoded. */
   private var artworkPath: String? = null
@@ -215,6 +278,7 @@ class PlaybackService : Service() {
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    lastStartId = startId
     when (intent?.action) {
       ACTION_SHOW -> {
         title = intent.getStringExtra(EXTRA_TITLE)?.takeIf { it.isNotBlank() } ?: title
@@ -227,7 +291,8 @@ class PlaybackService : Service() {
         canNext = intent.getBooleanExtra(EXTRA_NEXT, false)
         canPrevious = intent.getBooleanExtra(EXTRA_PREVIOUS, false)
         canSave = intent.getBooleanExtra(EXTRA_SAVE, false)
-        publish()
+        shown = true
+        publish(owed = intent.getBooleanExtra(EXTRA_OWED, false))
       }
 
       /**
@@ -273,9 +338,34 @@ class PlaybackService : Service() {
 
       ACTION_STOP -> teardown()
 
-      // Headset and Bluetooth keys arrive as a raw media button intent and are
-      // turned into the callbacks above by the session.
-      else -> session?.let { MediaButtonReceiver.handleIntent(it, intent) }
+      /**
+       * Headset and Bluetooth keys arrive as a raw media button intent and are
+       * turned into the callbacks above by the session.
+       *
+       * They only come this way when there is no live session to take them
+       * directly — the card is down — and androidx's `MediaButtonReceiver`
+       * delivers them with `startForegroundService`. A service in that state
+       * has nothing to show, so it used to handle the key and never go
+       * foreground, and Android killed the whole process five seconds later
+       * with `ForegroundServiceDidNotStartInTimeException` — one of the six
+       * such crashes in the S21 FE's DropBox had `MediaButtonReceiver` as its
+       * last start.
+       *
+       * So it always satisfies the contract first. With nothing described it
+       * then leaves again, in the same main-thread message, so no frame is
+       * drawn with it; if the key did wake a player, that player's own SHOW
+       * arrives as a later start and raises the card. With a card already
+       * described — a start refused earlier left it drawn by `notify` — it
+       * stays, now foreground, since a key press is the user asking for it.
+       */
+      else -> {
+        if (!isForegroundNow()) {
+          started = startForegroundCompat(build())
+          Log.i(TAG, "media key on a background service: foreground=$started shown=$shown")
+        }
+        session?.let { MediaButtonReceiver.handleIntent(it, intent) }
+        if (!shown) teardown()
+      }
     }
 
     return START_NOT_STICKY
@@ -289,6 +379,8 @@ class PlaybackService : Service() {
   }
 
   override fun onDestroy() {
+    started = false
+    shown = false
     releaseWakeLock()
     decoder.shutdownNow()
     session?.run {
@@ -304,7 +396,8 @@ class PlaybackService : Service() {
     runCatching { PlaybackCommandBus.emit(name, value) }
   }
 
-  private fun publish() {
+  /** `owed` is true when this publish answers a `startForegroundService`. */
+  private fun publish(owed: Boolean = false) {
     loadArtworkIfNeeded()
 
     session?.apply {
@@ -313,10 +406,30 @@ class PlaybackService : Service() {
     }
 
     val notification = build()
-    if (!started) {
-      startForegroundCompat(notification)
-      started = true
-    } else {
+
+    /**
+     * Asked, not remembered. The system can demote this service by itself —
+     * for a battery-restricted app it does so whenever the screen goes off —
+     * and nothing tells the service it happened.
+     *
+     * Not foreground, then: go foreground when a start is owed — skipping that
+     * is the uncatchable crash — or when sound is coming out, since a playing
+     * track without a foreground service is a process the system is free to
+     * freeze. Paused and owed nothing, a demotion is left alone; the system
+     * made it, and a paused card needs no protection.
+     */
+    val wasForeground = isForegroundNow()
+    if (started && !wasForeground) Log.i(TAG, "found demoted, playing=$playing")
+    val promoted = !wasForeground && (owed || playing) && startForegroundCompat(notification)
+    if (!wasForeground && (owed || playing)) {
+      Log.i(TAG, "startForeground owed=$owed playing=$playing -> $promoted")
+    }
+    started = wasForeground || promoted
+
+    // Already foreground, or not promoted: either way the card is still worth
+    // drawing. Not promoted while playing means playback lasts only as long as
+    // the process does.
+    if (!promoted) {
       getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification)
     }
 
@@ -477,7 +590,7 @@ class PlaybackService : Service() {
         // A later track may have overtaken this decode while it ran.
         if (artworkLoaded != path) return@post
         artwork = bitmap
-        if (started) publish()
+        if (shown) publish()
       }
     }
   }
@@ -537,8 +650,14 @@ class PlaybackService : Service() {
    * ForegroundServiceStartNotAllowedException here takes the whole app down.
    * Failing means playback lasts only as long as the process does, which is bad
    * but survivable; crashing is neither.
+   *
+   * Returns whether it took, and "took" is checked rather than inferred from
+   * the call not throwing. For an app the user has battery-restricted, Android
+   * ignores `startForeground` from the background *silently* — "not allowed
+   * due to bg restriction" in the system log, no exception — so a clean return
+   * proved nothing. Measured on the S21 FE with Spool restricted.
    */
-  private fun startForegroundCompat(notification: Notification) {
+  private fun startForegroundCompat(notification: Notification): Boolean =
     runCatching {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
         startForeground(
@@ -549,8 +668,23 @@ class PlaybackService : Service() {
       } else {
         startForeground(NOTIFICATION_ID, notification)
       }
+    }.isSuccess && (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || isForegroundNow())
+
+  /**
+   * Whether the system currently has this service in the foreground.
+   *
+   * `getForegroundServiceType` asks the system's own record, so it reflects a
+   * demotion the system made by itself; it reads `NONE` whenever the service
+   * is not foreground. Before Q there is no such question to ask — and no
+   * system demotion either — so the last result stands.
+   */
+  private fun isForegroundNow(): Boolean =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      runCatching { foregroundServiceType != ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE }
+        .getOrDefault(started)
+    } else {
+      started
     }
-  }
 
   /**
    * Only held while sound is actually coming out. A wake lock left on across a
@@ -573,6 +707,7 @@ class PlaybackService : Service() {
   private fun teardown() {
     releaseWakeLock()
     started = false
+    shown = false
     playing = false
     artwork = null
     artworkPath = null
@@ -583,7 +718,28 @@ class PlaybackService : Service() {
       @Suppress("DEPRECATION")
       stopForeground(true)
     }
-    stopSelf()
+    // A card drawn by `notify` after a refused start is not the foreground
+    // notification, so stopForeground leaves it behind.
+    getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+
+    /**
+     * `stopSelf(startId)`, never bare `stopSelf()`.
+     *
+     * A `startForegroundService` marks the service as owing a
+     * `startForeground` the moment the call is *made*, not when it is
+     * delivered. A bare `stopSelf()` stops the service unconditionally, and a
+     * service brought down while it owes that call is killed on the spot with
+     * `ForegroundServiceDidNotStartInTimeException`, which no `runCatching`
+     * can catch. Where a raise follows a release closely — one source lets the
+     * card go (STOP) and the next publish is issued before the main thread has
+     * run it — that is exactly what a bare `stopSelf()` did.
+     *
+     * With the start id, Android stops the service only if nothing has been
+     * started since. When a SHOW is queued behind us it stays up, and that
+     * SHOW finds the service not foreground and answers for itself.
+     */
+    val stopped = stopSelfResult(lastStartId)
+    Log.i(TAG, "teardown at start $lastStartId, stopped=$stopped")
   }
 }
 

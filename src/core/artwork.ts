@@ -22,6 +22,14 @@ import type { DownloadRecord } from './storage';
  * Failure is remembered too. An item with no artwork anywhere would otherwise
  * be retried on every render for the life of the app — and for a library saved
  * from pages that no longer exist, that is a network call per row per launch.
+ *
+ * **But not forever, and a success is not trusted blindly either.** Both used
+ * to be permanent, and measured on the S21 FE they left most of a 104-item
+ * library drawn as blank squares over files that each had a cover embedded:
+ * whatever went wrong once — a build whose decode failed, a moment offline, a
+ * cache Android had emptied — was never looked at again. A failure now expires
+ * after `RETRY_FAILED_MS`, and a cover whose cached file is gone is dropped at
+ * load so the next resolve rebuilds it.
  */
 
 const KEY_ARTWORK = 'dl.artwork';
@@ -33,8 +41,28 @@ export type Artwork = {
   dominant: string;
 };
 
-/** `null` is a remembered failure: asked for, nothing found, do not ask again. */
-type Index = Record<string, Artwork | null>;
+/** A remembered failure: asked for, nothing found, not asked again until it expires. */
+type Failure = { failedAt: number };
+
+/**
+ * `null` is how a failure was stored before failures carried a time. It is
+ * read as already expired, so a library that was blanked by the old rule is
+ * looked at once more on the next launch rather than never.
+ */
+type Index = Record<string, Artwork | Failure | null>;
+
+/**
+ * How long "nothing here" is believed. Long enough that an item with no cover
+ * anywhere costs one attempt a day rather than one per render; short enough
+ * that a failure caused by the moment — offline, a refused thumbnail — heals
+ * by itself.
+ */
+const RETRY_FAILED_MS = 24 * 60 * 60 * 1000;
+
+const isArt = (entry: Index[string] | undefined): entry is Artwork =>
+  !!entry && typeof (entry as Artwork).uri === 'string' && (entry as Artwork).uri.length > 0;
+
+const failed = (): Failure => ({ failedAt: Date.now() });
 
 let index: Index = {};
 let loaded = false;
@@ -94,11 +122,40 @@ export async function loadArtworkIndex(): Promise<void> {
   } catch {
     // A lost cache costs one re-decode per item, nothing more.
   }
+  dropMissingCovers();
   loaded = true;
 }
 
+/**
+ * The covers live in `cacheDir`, which Android and "Clear cache" empty
+ * whenever they like; this index lives in AsyncStorage and does not go with
+ * it. An entry pointing at a deleted file draws a blank square and, being a
+ * success, would never be asked about again. One synchronous native call for
+ * the whole index, once per launch.
+ */
+function dropMissingCovers(): void {
+  const known = Object.entries(index).filter((pair): pair is [string, Artwork] => isArt(pair[1]));
+  if (!known.length) return;
+  let present: boolean[];
+  try {
+    present = YtDlp.filesExist(known.map(([, art]) => art.uri));
+  } catch {
+    return; // Cannot tell, so believe the index — the old behaviour, no worse.
+  }
+  if (!Array.isArray(present)) return;
+  const gone = known.filter((_, i) => present[i] === false).map(([id]) => id);
+  if (!gone.length) return;
+  const next = { ...index };
+  gone.forEach((id) => delete next[id]);
+  index = next;
+  schedule();
+}
+
 /** What is known right now, without asking for anything. */
-export const artworkFor = (id: string): Artwork | null => index[id] ?? null;
+export const artworkFor = (id: string): Artwork | null => {
+  const entry = index[id];
+  return isArt(entry) ? entry : null;
+};
 
 /**
  * Thumbnail candidates, best first — the native side takes the first that
@@ -150,12 +207,14 @@ export function resolveVideoArtwork(videoId: string): Promise<Artwork | null> {
 }
 
 function resolve(id: string, path: string | null, urls: string[]): Promise<Artwork | null> {
-  if (id in index) return Promise.resolve(index[id]);
+  const known = index[id];
+  if (isArt(known)) return Promise.resolve(known);
+  if (known && Date.now() - known.failedAt < RETRY_FAILED_MS) return Promise.resolve(null);
   const pending = inFlight.get(id);
   if (pending) return pending;
 
   if (!path && !urls.length) {
-    index = { ...index, [id]: null };
+    index = { ...index, [id]: failed() };
     schedule();
     return Promise.resolve(null);
   }
@@ -169,7 +228,7 @@ function resolve(id: string, path: string | null, urls: string[]): Promise<Artwo
       return art;
     })
     .catch(() => {
-      index = { ...index, [id]: null };
+      index = { ...index, [id]: failed() };
       schedule();
       return null;
     })

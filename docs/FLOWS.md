@@ -11,7 +11,18 @@ Structure is in [ARCHITECTURE.md](ARCHITECTURE.md); what each feature does is in
 
 ## 1. Cold boot
 
-`App.tsx` mounts `SafeAreaProvider → ThemeProvider → PlayerProvider → BrowserScreen`.
+**Before any of this**, `index.ts` imports `src/core/bootstrap`, whose module
+body installs the crash captures and the `console` bridge and moves the previous
+run's log aside. It has to be the first import in the file: ES imports are
+hoisted and evaluated in source order, before any statement in the importing
+module's body, so an installer called from `index.ts`'s body would run *after*
+the whole app tree had been imported — which is exactly when a module-level
+throw would go unrecorded. See [FEATURES § 16](FEATURES.md#16-diagnostics--the-flight-recorder).
+
+`App.tsx` mounts `ErrorBoundary → SafeAreaProvider → ThemeProvider → PlayerProvider → BrowserScreen`.
+The boundary is outside every provider on purpose: one inside the tree it guards
+cannot draw once that tree is the thing that threw, and the providers are
+exactly where a bad restored value would surface.
 Fonts (Manrope, IBM Plex Mono) load first; until they do, a plain base-coloured
 `Splash` fills the screen, because the type scale names those families directly
 and rendering early would flash the system face at the wrong metrics.
@@ -19,8 +30,8 @@ and rendering early would flash the system face at the wrong metrics.
 `BrowserScreen`'s boot effect then runs, once:
 
 1. **Load everything in parallel** — `hasSeenFirstRun`, `loadDownloads`,
-   `loadSettings`, `loadSearches`, `loadSession`, `loadForgotten`, and
-   `loadArtworkIndex`. The artwork index is in that list so a library whose
+   `loadSettings`, `loadSearches`, `loadSession`, `loadForgotten`,
+   `loadPlaylists`, and `loadArtworkIndex`. The artwork index is in that list so a library whose
    covers are already known comes up with them rather than flashing placeholders
    on every launch.
 2. **`forgottenRef.current = forgotten`** — *before* the scan below. Otherwise the
@@ -35,6 +46,16 @@ and rendering early would flash the system face at the wrong metrics.
    cannot rewrite. If this is a trial build *and* first run is already done, the
    pre-release sheet opens. On a brand-new install it is deferred to the end of
    first run so the legal notice comes before the sales pitch.
+   Just before it, `refreshLicence()` — a signature check against the token on
+   disk, no network — because `refuseSave` consults the licence first.
+   Then, not awaited: `loadAccount()` and `loadLicenceFacts()` in parallel, and
+   only after both, `syncLicence()`. The order matters: the sync is
+   authenticated and must not go out before the stored session has been read,
+   and Profile's paid-through date comes from `dl.licence`, not the network.
+   Signed out, the sync returns without a request. A separate effect registers
+   `watchLicence()`, which syncs again whenever the app comes back to the front
+   — the token is a lease of a few days now, and a music player can stay alive
+   in the background for longer than that.
 6. **Restore the session** — see [§ 9](#9-restoring-a-session-at-launch).
 7. **`initEngine()`** — extracting the bundled Python takes a moment on first
    launch, so it happens now rather than making the user wait on their first
@@ -50,7 +71,16 @@ on the next launch.
 
 ## 2. First run
 
-`FirstRunScreen` → "I understand — start browsing":
+`OnboardingScreen` — three steps, button-driven, no swiping:
+
+1. **Welcome** → `I understand — continue`. The legal position is on this step,
+   above the button that accepts it.
+2. **What it does** → `Next`.
+3. **Premium** → `Start browsing`, or `See the offer`. Absent entirely when
+   `licence().entitled`.
+
+Either button on the last step calls `finishFirstRun(showOffer)`, and its order
+is load-bearing throughout:
 
 1. `markFirstRunSeen()`
 2. `requestNotificationPermission()` — API 33+ only
@@ -63,7 +93,13 @@ on the next launch.
    lands on an empty Library over a full folder, and only gets their music back
    if they happen to relaunch. Measured: 0 adopted on first launch, 43 on the
    next.
-6. If this is a trial build, open the pre-release sheet.
+6. **Only if `showOffer`**, raise a sheet: `PreReleaseSheet` in a trial build,
+   `SubscribeSheet` otherwise.
+
+**Step 6 used to be unconditional**, and with a premium step now in front of it
+that was the same person sold to twice inside ten seconds. The sheet is raised
+only when the user asked for it, and which sheet depends on which offer the
+build has — see [UI.md](UI.md#first-run--three-screens-once).
 
 **The general rule:** anything gated on first run must be re-run when first run
 *finishes*, not skipped there.
@@ -126,13 +162,24 @@ FAB tap in the `ready` or `failed` state:
 1. `setDl('resolving')`
 2. `listFormats({ videoId, url, title }, token.current)` — see
    [§ 15](#15-extraction-refused-client-walk-and-self-repair)
-3. Pick from settings: `bestAudio(formats, kbpsFromQuality(audioQuality))` or
+3. **Already in flight?** `jobs` is checked before `records`, because
+   `findDuplicate` reads only rows that have *finished* — so a job still
+   downloading was invisible to it. Measured: a retry and a tap on the same
+   video produced two identical 48 MB files, of which the library showed one
+   row and the other was disk nobody could see or reach. First tap explains,
+   second commits, exactly as for a duplicate.
+4. Pick from settings: `bestAudio(formats, kbpsFromQuality(audioQuality))` or
    `bestVideo(formats, heightFromQuality(videoQuality))`.
-4. Nothing of the requested kind → fall back to the sheet rather than failing
+5. Nothing of the requested kind → fall back to the sheet rather than failing
    silently, because the user did ask for something.
-5. `beginDownload(format.id, info)` — **`info` is passed explicitly** because
-   `setMeta` has not re-rendered yet, so reading component state here would look
-   the pick up in the *previous* video's format list.
+6. `beginDownload(format.id, info, settings.instant === 'audio')` — **`info` is
+   passed explicitly** because `setMeta` has not re-rendered yet, so reading
+   component state here would look the pick up in the *previous* video's format
+   list. The third argument is the *intent*, and it is passed for the same class
+   of reason: `bestAudio` can answer with a muxed format when the manifest has
+   no audio-only rung, and reading the kind back off that format would say
+   "video" and save a file the user did not ask for. Only the sheet path has no
+   intent to pass — there, the row that was tapped is the whole statement.
 
 ---
 
@@ -148,13 +195,15 @@ A pick then calls `beginDownload(pickId)`.
 2. **`refuseSave(durationSeconds)`** — checked here so the refusal can be worded,
    and again natively before anything downloads. On refusal: close the sheet,
    reset the FAB, flash the notice, stop.
-3. `setDl('working')`, add a `Job` to the list, subscribe to `onProgress`
-   filtered by id.
+3. Add a `Job` to the list and subscribe to `onProgress` filtered by id. **The
+   FAB is handed straight back** — `setDl(videoId ? 'ready' : 'idle')`, "free the
+   moment the job is on the list". It is not held for the length of a download;
+   that arrangement was N8. Progress lives on the Library row.
 4. `YtDlp.download(...)` — native. See [§ 6](#6-what-the-native-download-does).
 5. On success: `publishToGallery(path, title, audioOnly)` → a `content://` uri.
 6. `finish(record)` — prepend the record, **drop any earlier row for the same
-   video**, `setDl('done')`, `refreshTrial()` (a save has just spent a slot), and
-   after `motion.doneHold` reset the FAB.
+   video**, `refreshTrial()` (a save has just spent a slot). The button is not
+   told anything here; `fabState` derives `done` from the library itself.
 
    Dropping the older row is load-bearing: both paths write to one output file
    and publishing *moves* it, so a manual save of something already kept
@@ -168,6 +217,33 @@ A pick then calls `beginDownload(pickId)`.
 
 ## 6. What the native download does
 
+**`DownloadService` has one slot, and every path must take it.** One
+`currentId`, one ongoing notification, and an `ACTION_STOP` from whichever job
+finishes first — so two overlapping downloads do not queue, they interfere: the
+first to finish tears down the foreground service the other is still running
+under, and Android 12+ will not let it simply be started again from the
+background.
+
+`takeSlot()` in `BrowserScreen` is the lock, over the one `downloadQueue`
+promise chain. All four paths go through it — the FAB, the replay rule, the
+notification's save button, and a failed row's *Try again*. The last two did not
+until recently, and both are reachable while something is already downloading:
+the card is reachable with the app off screen, and Library at any time.
+
+**The release must sit in a `finally`.** Each of these bodies has an early
+`return` on `E_CANCELLED`, and one path that skips the release wedges every
+later download in the app until it is restarted. For the same reason the lock
+swallows the previous holder's rejection: one failed download must not stop the
+queue.
+
+**And every command into `DownloadService` goes foreground before it is
+dispatched.** `startForegroundService()` starts a ~5s fuse; if `startForeground()`
+has not run by then the system throws
+`ForegroundServiceDidNotStartInTimeException` at the main thread and kills the
+process, uncatchably. Raising the notification unconditionally — even on a
+`STOP`, which removes it in the same main-thread message — is what closes that.
+See `AGENTS.md`.
+
 `YtDlpModule.download`, on `Dispatchers.IO`:
 
 1. **`TrialGuard.refuse(context, seconds)`** first — before any work. This is the
@@ -177,28 +253,63 @@ A pick then calls `beginDownload(pickId)`.
    the user never sees; yt-dlp resumes from `.part`, so only old ones are swept.
 3. Start `DownloadService` in the foreground.
 4. Build the request: `--no-playlist`, `--no-warnings`, `--newline`,
-   `-o <downloads>/<jobId>.%(ext)s`, `--embed-thumbnail`, `--embed-metadata`,
+   `-o <downloads>/<stem>.%(ext)s`, `--embed-thumbnail`, `--embed-metadata`,
    then either `-f <fmt> -x --audio-format m4a` or
    `-f <fmt> --merge-output-format mp4`, then `applyExtractorArgs` and
    `applyBrowserSession`.
 
-   **The output template is named for the job id, not the title.** See
-   [ARCHITECTURE § filenames](ARCHITECTURE.md#filenames-are-counted-in-bytes).
+   **`stem` is `partialKey` — `{videoId}.{a|vHEIGHT}` — not the job id and not
+   the title.** Not the title because
+   [the filesystem counts bytes](ARCHITECTURE.md#filenames-are-counted-in-bytes);
+   not the job id because a name minted per attempt is a name yt-dlp can never
+   resume into, and `--continue` is on by default. The quality is in the key
+   because a `.part` belongs to one format. Kotlin re-filters the string before
+   it becomes a path.
 5. Execute, emitting `onProgress` per line.
-6. **Find the result by name** — `listFiles().filter { it.name.startsWith(id) }`,
-   excluding images, `.part` and `.ytdl`. The old rule fell back to the newest
-   media file anywhere in the folder, which resolved a *failed* download as a
-   success pointing at some earlier track — and then spent a trial save on it.
+6. **`finished(outputDir, stem, startedAt)`** — files named `<stem>.*`, matched
+   against the `INTERMEDIATE` pattern and excluding every one of: images
+   (`--embed-thumbnail`'s leftovers), `.part` and `.part-FragN` and `.ytdl` (a
+   download in progress), `.fNNN.` (half of a merge yt-dlp never completed), and
+   **`.temp.` — the merge ffmpeg is still writing**. That last one is the
+   dangerous omission rather than a tidy-up: a `.temp.` file carries the real
+   container's extension and matches no `.fNNN.` pattern, so excluding only the
+   latter publishes a *truncated* video. Caught on device with `.v144.mp4` and
+   `.v144.temp.mp4` side by side, 35 MB against 33 MB. Among what survives that
+   filter, prefer one modified since this attempt began.
+
+   Two rules are folded in there. The old lookup fell back to the newest media
+   file anywhere in the folder, which resolved a *failed* download as a success
+   pointing at some earlier track and spent a trial save on it. And now that the
+   name is shared across attempts, "a file with this name exists" is no longer
+   proof this attempt wrote one — hence `startedAt`. Falling back to an older
+   file of the same stem is still correct: that is yt-dlp's "already downloaded"
+   case.
 7. `TrialGuard.spend(context)` — only once a file exists.
 8. Resolve `{ path, bytes }`.
+
+**On failure, step 6 runs again before the rejection.** If a complete file is
+there, it is resolved with `salvagedFrom` carrying the engine's complaint. This
+is for the case where everything *after* the media succeeded except a
+decoration: measured on a 31-minute save whose 73 MB of audio was complete and
+whose cover art would not embed, and which the user was told did not finish. The
+exclusions in `finished` are what keep it honest — a dropped connection leaves a
+`.part` and nothing else, so it still fails — and a cancel is excluded outright,
+since resolving there would put a track in the library the user never asked for.
+
 
 `applyExtractorArgs` builds **one** `--extractor-args` string: yt-dlp *replaces*
 rather than merges repeated args for the same extractor, so passing them
 separately silently drops all but the last. With a token it emits
-`player_client=web;po_token=web.gvs+<token>` (plus `visitor_data` only alongside
-a token — on its own it pins requests to a session with no attestation, which is
-worse than nothing). Without one it emits `player_client=<client>` from the
-caller's chain.
+`player_client=<client>;po_token=<client>.gvs+<token>` — the client is the
+caller's, not a constant, because a token is ignored when labelled for a client
+we are not asking as — plus `visitor_data` only alongside a token, since on its
+own it pins requests to a session with no attestation, which is worse than
+nothing. Without one it emits `player_client=<client>` from the caller's chain.
+
+Which attempt carries the token is `attempts()` in `core/ytdlp.ts`, not this
+function: the token chain is walked first with it, and then the whole open chain
+with it dropped, so **a bad token costs a slower walk rather than a failed
+download**.
 
 ---
 
@@ -212,9 +323,12 @@ caller's chain.
    WebView message rather than a render and must not close over settings from
    minutes ago). It returns early unless enabled, unsaved, and
    `starts >= settings.after`.
-4. The job is appended to `autoQueue`, a promise chain — **one at a time**, so
-   several thresholds falling in one session cannot compete for bandwidth with
-   whatever the user is currently watching.
+4. The job is appended to `downloadQueue` — **the same promise chain the browser's
+   own saves use**, not a second one, so it is one at a time across both. Several
+   thresholds falling in one session cannot compete for bandwidth with whatever
+   the user is currently watching, and cannot land on top of a manual save.
+   A separate auto queue is the pre-N6 arrangement in which two jobs shared
+   `DownloadService`'s single `currentId`.
 
 ### `autoSaveStat`
 
@@ -224,14 +338,26 @@ caller's chain.
 3. `listFormats` on `https://m.youtube.com/watch?v=<id>` — its own url, not the
    page the user is on now.
 4. `wantAudio = keepAs === 'audio' || (keepAs === 'match' && stat.music !== false)`
-5. Pick with `bestAudio`/`bestVideo`; return if nothing fits.
-6. `refuseSave` — the rule has no interface, so a refusal says nothing and simply
-   does not save. The video stays unmarked so it is retried on a full copy.
-7. Download, add a job with `auto: true`.
-8. **Do not publish.** The record gets `uri: file://<path>` and `auto: true`.
-9. On failure, record a failed row anyway — a silent failure leaves the user
+5. Pick with `bestAudio`/`bestVideo`. **Nothing at all now throws a stated
+   error rather than returning.** This used to `return` — no file, no row, no
+   notice, and no line anywhere — on a rule whose entire contract is "this will
+   be kept after N plays". It was also reachable far more often than it looked:
+   a degraded manifest has no audio-only stream, so with `keepAs: audio` the
+   rule was a silent no-op every time. See [§ 15](#15-extraction-refused-client-walk-and-self-repair).
+6. `audioOnly` is **what was asked for**, not `format.kind` — `bestAudio` can
+   answer with a muxed format, and `-x` extracts the audio from it.
+7. `refuseSave` — a trial refusal is not a fault, so it records a `gave up` line
+   rather than a failed row. The video stays unmarked so it is retried on a full
+   copy.
+8. Download, add a job with `auto: true`.
+9. **Do not publish.** The record gets `uri: file://<path>` and `auto: true`.
+10. On failure, record a failed row anyway — a silent failure leaves the user
    believing they have a file they do not have. It stays marked, so this does not
    become a retry loop.
+
+The whole sequence runs under one `log.flow('replay', …)`, including the
+decisions to do nothing. The rule has no interface, so the log *is* its
+interface.
 
 It never touches the FAB or the sheet: the user did not ask for anything and must
 not be interrupted mid-video.
@@ -309,6 +435,12 @@ because the play index has not loaded yet.
 
 Inside `PlayerContext.toggle`:
 
+0. **The play lock** (`lockPending`, see [§ 19](#19-the-play-lock)) — only on a
+   path that is about to make sound. Signed out, or holding a live lease, it
+   returns synchronously and nothing below changes. Otherwise the start stops
+   here, the claim goes out, and `toggle` is re-run from `toggleRef` once — and
+   only if — it is granted. It sits *before* `silenceOthers` so a refused start
+   has not paused the page on its way to doing nothing.
 1. **`silenceOthers()`** — the playback gate, on *every* branch including the
    resume-the-loaded-track one. `playRecord` used to pause the page only when
    starting a *new* track, so resuming the already-loaded one — the most common
@@ -458,29 +590,112 @@ Android deletes with the app.
 
 ---
 
+## 14b. Signing out of YouTube
+
+`signOut` in `BrowserScreen`, from **Profile → Sign out of YouTube**:
+
+1. `Alert.alert` confirms, and states the boundary: the device forgets the
+   session, the library stays, and Google is not told.
+2. `signOutOfYouTube()` → `AsyncFunction("signOutOfYouTube")` → `main.post` →
+   `CookieJar.clear`: `CookieManager.removeAllCookies` + `flush`,
+   `WebStorage.deleteAllData`, then every jar in `noBackupFilesDir/session/`.
+3. The promise resolves **from the main thread, after the removal**.
+4. Only then: `setEntry(HOME_URL)`, `setUrl(HOME_URL)`, bump `webviewKey`.
+
+**Step 3 before step 4 is the load-bearing order.** The page on screen at the
+moment of signing out is authenticated, and a WebView left running through the
+removal writes its cookies straight back — so a remount that overlaps the clear
+leaves the user signed in with a control that reported success. The native side
+resolves on the main thread specifically so the JS side cannot get ahead of it.
+
+Then `setScreen('browse')` and a `flashNotice`, because the notice strip only
+draws on Browse and a signed-out home feed is the only proof the user can check.
+
+### What it does not do
+
+End the session at Google. That is Google's to revoke, from the account's device
+list. A download already in flight keeps the jar it was handed — it was minted
+before the clear and is discarded by its own `finally` — so signing out does not
+break a running save, and the next one goes out unauthenticated.
+
+---
+
 ## 15. Extraction refused: client walk and self-repair
 
-`withClientFallback(hasToken, run)`:
+`withClientFallback(hasToken, run, judge?)`:
+
+`attempts()` builds the list of tries first. **Holding a token does not shorten
+it** — that is the whole of N12:
 
 ```
-hasToken → run(null) once           # a token pins player_client=web anyway,
-                                    # so walking would repeat the same request 5×
+attempts(hasToken):
+    hasToken → leg('token', TOKEN_CHAIN)  ++  leg('open', OPEN_CHAIN, tokenDropped)
+    else     → leg('open', OPEN_CHAIN)
 
-otherwise, pass 1:  [preferredClient, ...rest]  or  CLIENT_CHAIN
-    for each client:
-        success → remember it, return
-        looksBlocked(e) → next client
-        anything else (broken pipe, cancel) → throw immediately
+    TOKEN_CHAIN = ['mweb', 'web']
+    OPEN_CHAIN  = ['tv', null, 'web_embedded', 'mweb', 'android_vr']
 
-    every client refused, and this session has not updated yet:
-        YtDlp.updateEngine(), clear preferredClient, go to pass 2
-
-pass 2: walk the chain again
-still failing → throw the last error
+    each leg is led by its own remembered client — `preferredToken` for the
+    token leg, `preferredOpen` for the open one — and the rest of the leg is
+    ordered by the persisted scoreboard in `core/clients.ts` (`orderChain`).
 ```
 
-`looksBlocked` matches `403|forbidden|sign in|not a bot|unable to download|player response|precondition|unavailable`.
-A refusal is worth another client; a broken pipe or a cancel is not.
+The second half of the token case is load-bearing. A held token narrows the
+request to the two clients that could have minted it, so an expired one, or one
+bound to another video, would leave two chances where a tokenless request had
+five. Appending the open chain with the token dropped means an exhausted token
+ends where an empty pocket would have started.
+
+Then the walk over that list:
+
+```
+for each attempt:
+    threw, and looksBlocked(e)      → next attempt
+    threw anything else             → throw immediately (broken pipe, cancel)
+    answered, judge says degraded   → keep as `fallback`, next attempt
+    answered clean                  → remember it for its mode, return
+
+every attempt refused or degraded, and this session has not updated yet:
+    YtDlp.updateEngine(), clear both pins, wipe the scoreboard, drop
+    fallback, walk the whole list again
+
+still nothing clean, but something answered → return the best degraded answer
+nothing answered at all                     → throw the last error
+```
+
+The pin is **per mode**, not one global one: a client that proved good while
+tokenless says nothing about the same client on a tokened request.
+
+`looksBlocked` matches
+`403|forbidden|sign in|not a bot|unable to download|player response|precondition|unavailable|format is not available|no video formats|needs to be reloaded|nsig`.
+A refusal is worth another client; a broken pipe or a cancel is not. The last two
+terms were added from live logs, and `The page needs to be reloaded.` is the
+specific phrase that twice stopped the walk on the second client of five — do not
+trim them back.
+
+### Why a successful answer can still be wrong
+
+A client that is refused does not always throw. It can return, successfully, a
+manifest holding one muxed 360p and nothing else — and the walk used to accept
+that, because nothing had gone wrong in any way it could see.
+
+Measured on the phone: `android_vr` answered thinly, was pinned for the rest of
+the session, and the clients behind it were never asked. (It is last in
+`OPEN_CHAIN` today for exactly this reason — since 2026 it needs a GVS token, and
+without one it answers thinly rather than refusing.) Every layer downstream then behaved *correctly* on a manifest that
+was wrong — `bestAudio` found no audio-only stream, and the replay rule returned
+without a word.
+
+`judgeManifest` therefore judges the answer as well as the throw: no formats at
+all, or no audio-only rung, which every healthy YouTube manifest has. Audio is
+the default `keepAs`, so that second rule is the difference between the replay
+rule working and it doing nothing.
+
+**A degraded answer is kept, not discarded.** If the whole chain does no better,
+the best one seen is returned rather than thrown away — a thin manifest still
+downloads something, and something is what the user asked for. That is what
+makes it safe to judge harshly: being wrong costs a slower walk, never a failed
+download.
 
 The engine repairs itself **once per session** — it is a network call. Every
 client being turned away is also exactly what a months-stale extractor looks
@@ -644,3 +859,76 @@ exactly the moment the card most needs repainting.
   `PlaybackService`, destroy every running yt-dlp process by id.
 - **Task swiped away** — `PlaybackService.onTaskRemoved` emits `stop` and tears
   down, so no notification is left behind.
+
+---
+
+## 19. The play lock
+
+`src/core/playLock.ts`, wired into `PlayerContext` at four points. Only when
+signed in.
+
+**Starting sound** — `toggle`'s resume and new-track branches and
+`togglePlayback`'s play branch call `lockPending(again)`:
+
+1. `playPermitted()` — synchronous: no session, or a lease/permit whose `until`
+   has not passed → go ahead now.
+2. Otherwise `claimPlay(again)` posts `/v1/play/claim {device, takeover:false}`
+   with a 5 s timeout and hands the reply to `judge` (pure):
+   - `{ok:true, leaseMs}` → held until `now + leaseMs − 10 s`; `again()` runs.
+   - `409 {device}` → the "Playing on *device*" sheet, holding `again` as the
+     retry. `Play here instead` → `takeOver()` → claim with `takeover:true` →
+     on success, `again()`.
+   - anything else — offline, timeout, 5xx, 429, 400 — is no news: allowed as
+     a 60 s permit if `dl.serverContact` is under 24 h old, otherwise the
+     "offline" sheet and no sound.
+   - the session ending mid-claim (401/403) → allowed; there is no account left.
+
+**While anything is loaded** — an interval of `HEARTBEAT_MS` (60 s) calls
+`beat(engine.playing, pauseNow, resume)`:
+
+- playing → re-claim without takeover. A 409 here means another device took
+  over: `pauseNow()` and the "Playback moved to *device*" sheet. A network
+  failure changes nothing — the track plays on; only the *next* start is judged.
+- not playing and holding a lease → release it. This is what catches a pause
+  from a path that never said so.
+
+A late tick (Android throttles background timers) just means the lease may have
+lapsed on the server; the next beat re-claims *without* takeover, and a 409 then
+correctly means someone else started in the gap.
+
+**Stopping sound** — the pause branches of `toggle` and `togglePlayback`,
+`pauseNow` and `stop` call `releasePlay()`: fire-and-forget
+`/v1/play/release`, and only if a *lease* (not an offline permit) is held. The
+consequence worth knowing: a resume after a pause pays one network round trip,
+because the lease was given back.
+
+Not gated: repeat-one's replay and anything else that continues the track
+already playing — the lease is live, and the heartbeat is watching.
+
+---
+
+## 20. Paying for a subscription
+
+`SubscribeSheet`, over `core/payments.ts`.
+
+1. **Mount** — `loadPendingOrder()`: an unexpired order from before a process
+   death reopens straight on the pay step.
+2. **Signed out** → `openAccount({ next: 'paywall', reason })` closes this sheet
+   and opens the account sheet; a successful sign-in there forces a licence
+   sync and reopens the paywall with the same reason.
+3. **Continue** → `startPayment(plan)` → `/v1/pay/start`. The order is saved as
+   `dl.pendingOrder`. A `signed-out` answer goes back to step 2.
+4. **Pay** → `Linking.openURL(upiUrl)`; the user leaves for a UPI app, or scans
+   the QR from another phone.
+5. **Upload** → `launchImageLibraryAsync({ mediaTypes: ['images'], quality: 1 })`
+   → `YtDlp.recognizeText(original)` (a failure leaves the text empty and
+   carries on) → `YtDlp.shrinkImage(original, 1600, 80)` (a failure uploads the
+   original) → `submitScreenshot(order, jpeg, text)`: multipart `order`, `text`,
+   `image`, 45 s timeout.
+6. **approved** → `rememberPaidThrough`, `clearPendingOrder`,
+   `syncLicence({ force: true })` — all before the sheet renders "You are all
+   set", so the download button is unlocked by the time it says so.
+   **review / rejected** → reasons, and the WhatsApp message; the order is kept
+   for "Try another screenshot".
+7. **I have already paid** → `syncLicence({ force: true })`, then read
+   `licence()` fresh.

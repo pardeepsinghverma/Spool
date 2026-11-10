@@ -26,7 +26,37 @@
   <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
   <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
-  <application>
+  <!--
+    Auto Backup is on (the Expo template sets android:allowBackup="true" on the
+    app manifest, which is higher priority than this one) and by default it
+    excludes only the cache directories. That put app_webview/ — the WebView's
+    cookie jar, and after a sign-in the user's live YouTube session — into
+    Google's cloud backup and into device-to-device transfer, where it would be
+    restored onto another phone as a working login.
+
+    These two files say what may leave. Both are needed: fullBackupContent is
+    read on Android 11 and older, dataExtractionRules on Android 12 and newer,
+    and they are written to say the same thing.
+
+    android:allowBackup is deliberately not repeated here. It is already set on
+    the generated manifest, and declaring it again in a library manifest is a
+    merge conflict rather than an override.
+  -->
+  <!--
+    The network policy is declared rather than left to the platform default.
+
+    Release denies cleartext outright; the debug source set replaces the same
+    resource with one that permits it, because the licence server runs on
+    Laragon over plain HTTP while it is being built. Left to the default, a
+    debug build's request to it is refused before it leaves the phone, and
+    `syncLicence` treats a thrown fetch as "no news" by design — so the symptom
+    is a server that never receives a request and an app that reports nothing
+    wrong. See src/main/res/xml/spool_network_security.xml.
+  -->
+  <application
+    android:fullBackupContent="@xml/spool_backup_rules"
+    android:dataExtractionRules="@xml/spool_data_extraction_rules"
+    android:networkSecurityConfig="@xml/spool_network_security">
     <service
       android:name=".DownloadService"
       android:exported="false"

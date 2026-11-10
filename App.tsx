@@ -14,6 +14,7 @@ import {
 } from '@expo-google-fonts/ibm-plex-mono';
 import { BrowserScreen } from './src/browser/BrowserScreen';
 import { PlayerProvider } from './src/player/PlayerContext';
+import { ErrorBoundary } from './src/ui/ErrorBoundary';
 import { ThemeProvider } from './src/ui/ThemeContext';
 import { fixed } from './src/ui/theme';
 
@@ -30,15 +31,20 @@ export default function App() {
   });
 
   return (
-    <SafeAreaProvider>
-      <ThemeProvider>
-        {/* Playback outlives any one screen — it has to keep going while the
-            user is in another tab, or with the app closed entirely. */}
-        <PlayerProvider>
-          {fontsReady ? <Root /> : <Splash />}
-        </PlayerProvider>
-      </ThemeProvider>
-    </SafeAreaProvider>
+    // Outside every provider on purpose. A boundary inside the tree it guards
+    // cannot draw once that tree is the thing that threw, and the providers are
+    // exactly where a bad restored value would surface.
+    <ErrorBoundary>
+      <SafeAreaProvider>
+        <ThemeProvider>
+          {/* Playback outlives any one screen — it has to keep going while the
+              user is in another tab, or with the app closed entirely. */}
+          <PlayerProvider>
+            {fontsReady ? <Root /> : <Splash />}
+          </PlayerProvider>
+        </ThemeProvider>
+      </SafeAreaProvider>
+    </ErrorBoundary>
   );
 }
 

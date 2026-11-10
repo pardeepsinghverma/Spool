@@ -17,6 +17,8 @@ import { WebView, type WebViewNavigation } from 'react-native-webview';
 import type { WebViewMessageEvent, WebViewProps } from 'react-native-webview';
 import Svg, { Circle } from 'react-native-svg';
 import type { Format } from '../core/engine';
+import * as log from '../core/log';
+import { remember, tokenFor } from '../core/tokens';
 import {
   DEFAULT_SETTINGS,
   hasSeenFirstRun,
@@ -67,11 +69,14 @@ import {
   publishToGallery,
   writeTextFile,
   scanSaved,
+  setScreenOrientation,
+  setSecureWindow,
+  signOutOfYouTube,
   startDownload,
   updateEngine,
   type VideoMeta,
 } from '../core/ytdlp';
-import { FirstRunScreen } from '../screens/FirstRunScreen';
+import { OnboardingScreen } from '../screens/OnboardingScreen';
 import { NowPlayingBar } from '../player/NowPlayingBar';
 import { usePlayer } from '../player/PlayerContext';
 import { HomeScreen, type RepeatRow } from '../screens/HomeScreen';
@@ -93,7 +98,20 @@ import { PlayerScreen } from '../player/PlayerScreen';
 import { ChoiceSheet } from '../sheets/ChoiceSheet';
 import { NameSheet } from '../sheets/NameSheet';
 import { PreReleaseSheet } from '../sheets/PreReleaseSheet';
-import { refreshTrial, refuseSave, setPreReleaseOpener, trial } from '../core/trial';
+import { refreshTrial, refuseSave, setPreReleaseOpener, trial, useIsAppLocked } from '../core/trial';
+import { SubscribeSheet } from '../sheets/SubscribeSheet';
+import {
+  licence,
+  loadLicenceFacts,
+  refreshLicence,
+  setPaywallOpener,
+  syncLicence,
+  watchLicence,
+} from '../core/license';
+import { type AccountIntent, loadAccount, setAccountOpener } from '../core/account';
+import { usePlayNotice } from '../core/playLock';
+import { AccountSheet } from '../sheets/AccountSheet';
+import { PlayLockSheet } from '../sheets/PlayLockSheet';
 import { QualitySheet, type SheetMode } from '../sheets/QualitySheet';
 import { useTheme } from '../ui/ThemeContext';
 import { fixed, motion, radius, size, space, type, tintFromDominant } from '../ui/theme';
@@ -117,6 +135,8 @@ import {
   USER_AGENT,
   extractVideoId,
   hostOf,
+  isSignInPage,
+  type FullscreenMessage,
   type NavMessage,
 } from './youtube';
 
@@ -158,10 +178,12 @@ type Job = {
    * button stops whichever started last, and the first job to finish sends
    * ACTION_STOP and drops the foreground service out from under the others.
    *
-   * The replay rule shares the same chain. The notification's save button and a
-   * failed row's retry still start the moment they are asked — they always did,
-   * and neither can be asked for in a burst the way the button can — so the
-   * single-slot rule is not yet absolute. See docs/RELIABILITY.md.
+   * Every path shares that chain now — the replay rule joins it directly, and
+   * the notification's save button and a failed row's retry take the same lock
+   * through `takeSlot`. The rule is absolute, which is what it has to be: the
+   * card is reachable with the app off screen and Library is reachable at any
+   * time, so "these two cannot be asked for in a burst" was never a property
+   * anything enforced.
    */
   queued: boolean;
   /** Each job cancels itself, so an automatic one cannot stop a manual one. */
@@ -210,6 +232,7 @@ export function BrowserScreen() {
   const [canGoBack, setCanGoBack] = useState(false);
   const [canGoForward, setCanGoForward] = useState(false);
   const [loadProgress, setLoadProgress] = useState<number | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const [dl, setDl] = useState<DownloadState>('idle');
   const [progress, setProgress] = useState(0);
@@ -226,9 +249,26 @@ export function BrowserScreen() {
    * working" instead. Also opened on demand by the trial chip.
    */
   const [preRelease, setPreRelease] = useState(false);
+  /**
+   * The paywall, and the sentence that raised it.
+   *
+   * `null` is closed; an object is open. The reason travels with it rather than
+   * living in its own state so the two can never disagree — a sheet showing
+   * last refusal's wording is worse than one showing none.
+   */
+  const [paywall, setPaywall] = useState<{ reason?: string } | null>(null);
+  const appLocked = useIsAppLocked();
+  const [accountSheet, setAccountSheet] = useState<AccountIntent | null>(null);
+  const playNotice = usePlayNotice();
   const [meta, setMeta] = useState<VideoMeta | null>(null);
   const [quality, setQuality] = useState('');
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Whether the extraction failure that raised the sheet could be a stale
+   * extractor. Drives both the sheet's wording and whether it offers to update
+   * — see `looksStale`.
+   */
+  const [errorStale, setErrorStale] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
   const [records, setRecords] = useState<DownloadRecord[]>([]);
   /**
@@ -241,10 +281,18 @@ export function BrowserScreen() {
     busy: false,
   });
 
-  const token = useRef<{ poToken: string; visitorData: string }>({
-    poToken: '',
-    visitorData: '',
-  });
+  /**
+   * The PO token for one video, at the moment of asking.
+   *
+   * A web PO token is bound to a video id, so there is no such thing as "the"
+   * token — only the token for the video being downloaded. Every download path
+   * therefore looks its own up rather than reading a shared slot, and gets
+   * nothing rather than someone else's. See src/core/tokens.ts.
+   */
+  const tokenNow = useCallback(
+    (id: string | null | undefined) => tokenFor(id, Date.now()),
+    [],
+  );
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const {
@@ -374,6 +422,32 @@ export function BrowserScreen() {
     return () => setPreReleaseOpener(null);
   }, []);
 
+  /** The paywall is raised from Profile and from a refused save. Same registry. */
+  useEffect(() => {
+    setPaywallOpener((reason?: string) => setPaywall({ reason }));
+    return () => setPaywallOpener(null);
+  }, []);
+
+  /** The account sheet: from Profile, from the paywall when signed out, and on a block. */
+  useEffect(() => {
+    setAccountOpener((intent) => {
+      // One sheet at a time: the paywall hands over to this one, never sits under it.
+      setPaywall(null);
+      setAccountSheet(intent);
+    });
+    return () => setAccountOpener(null);
+  }, []);
+
+  /** A lease-length licence needs a sync on return to the app, not only at boot. */
+  useEffect(() => watchLicence(), []);
+
+  useEffect(() => {
+    if (appLocked) {
+      pauseBrowserMedia();
+      pauseLocal();
+    }
+  }, [appLocked, pauseBrowserMedia, pauseLocal]);
+
   /**
    * Uris the user removed while keeping the file, so a rescan cannot undo it.
    * A ref rather than state: nothing renders from it, and `forget` writes to it
@@ -465,6 +539,41 @@ export function BrowserScreen() {
   const downloadQueue = useRef<Promise<void>>(Promise.resolve());
 
   /**
+   * The one slot, shared by every path that can start a download.
+   *
+   * `DownloadService` is single-slot by construction — one `currentId`, one
+   * ongoing notification, and an `ACTION_STOP` from whichever job finishes
+   * first. Two overlapping downloads therefore do not queue, they interfere:
+   * the first to finish tears down the foreground service the other is still
+   * running under, and on Android 12+ that service cannot simply be started
+   * again from the background.
+   *
+   * The FAB and the replay rule already shared this chain. The notification's
+   * save button and a failed row's *Try again* did not, and both can be
+   * triggered while something is already downloading — the card is reachable
+   * with the app off screen, and Library is reachable at any time.
+   *
+   * Returns the release, rather than taking the work as a callback: the two
+   * callers below are long `try`/`catch` bodies that already handle their own
+   * failures, and a lock they release in a `finally` wraps them without
+   * restructuring either. **The release must be in a `finally`** — a path that
+   * returns early without it wedges every later download in the app.
+   *
+   * The prior chain's rejection is swallowed on purpose. One failed download
+   * must not stop the queue; that would turn a single bad video into an app
+   * that never downloads again until it is restarted.
+   */
+  const takeSlot = useCallback(async (): Promise<() => void> => {
+    const prior = downloadQueue.current;
+    let release!: () => void;
+    downloadQueue.current = new Promise<void>((r) => {
+      release = r;
+    });
+    await prior.catch(() => {});
+    return release;
+  }, []);
+
+  /**
    * Jobs cancelled before they ever started.
    *
    * A queued job has no native download to stop, so its cancel takes it off the
@@ -472,6 +581,9 @@ export function BrowserScreen() {
    * reaches it a minute later and starts something the user already dismissed.
    */
   const abandoned = useRef<Set<string>>(new Set());
+
+  /** The last harvest shape logged, so a once-a-second report is not a log. */
+  const harvestSig = useRef<string>('');
   const runAutoSave = useRef<(stat: PlayStat) => Promise<void>>(async () => {});
 
   const onPlayCounted = useCallback((stat: PlayStat) => {
@@ -546,8 +658,22 @@ export function BrowserScreen() {
       // end of first run rather than dropped — a tester who installs, taps
       // through and never relaunches would otherwise never be told this is a
       // pre-release at all, which is the one thing they must be told.
+      // Read before the trial, because `refuseSave` consults it first and a
+      // subscriber must never see a trial refusal in the window between the two.
+      // This is a signature check against a token already on disk — no network,
+      // and correct on a device that has not been online for a month.
+      refreshLicence();
+
       const limits = refreshTrial();
-      if (limits.trial && seen) setPreRelease(true);
+      // A subscriber is not a tester, so the pre-release pitch is not for them.
+      if (limits.trial && seen && !licence().entitled) setPreRelease(true);
+
+      // Then ask the server, without waiting for it. A payment approved
+      // while the app was closed shows up here; being offline changes nothing,
+      // because the licence on disk is what decides and it is already read.
+      // The session and the persisted paid-through date are read first — the
+      // sync is authenticated, and the date is what Profile shows offline.
+      void Promise.all([loadAccount(), loadLicenceFacts()]).then(() => syncLicence());
 
       /**
        * Put the user back where they were. The session stores ids rather than
@@ -664,6 +790,22 @@ export function BrowserScreen() {
 
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (isFullscreen) {
+        webview.current?.injectJavaScript(`
+          if (document.exitFullscreen) {
+            document.exitFullscreen();
+          } else if (document.webkitExitFullscreen) {
+            document.webkitExitFullscreen();
+          }
+          if (window.screen && window.screen.orientation && window.screen.orientation.unlock) {
+            try { window.screen.orientation.unlock(); } catch (e) {}
+          }
+          true;
+        `);
+        setIsFullscreen(false);
+        setScreenOrientation('portrait');
+        return true;
+      }
       if (picker) {
         setPicker(null);
         return true;
@@ -698,7 +840,20 @@ export function BrowserScreen() {
       return false;
     });
     return () => sub.remove();
-  }, [sheet, screen, canGoBack, videoOpen, picker, openList]);
+  }, [sheet, screen, canGoBack, videoOpen, picker, openList, isFullscreen]);
+
+  useEffect(() => {
+    if (screen !== 'browse' && isFullscreen) {
+      setIsFullscreen(false);
+      setScreenOrientation('portrait');
+    }
+  }, [screen, isFullscreen]);
+
+  useEffect(() => {
+    return () => {
+      setScreenOrientation('portrait');
+    };
+  }, []);
 
   /**
    * The FAB's wake. Three pulses when a watch page resolves, then stillness —
@@ -740,11 +895,84 @@ export function BrowserScreen() {
     // question the user has to answer, so it is given long enough to read and
     // act on before it clears itself.
     (text: string, ms = 3000) => {
+      log.info('ui', 'notice', { text, ms, screen: screenRef.current });
       setNotice(text);
       later(() => setNotice(null), ms);
     },
     [later],
   );
+
+  /**
+   * No screenshot, no screen recording, no mirroring — but only while the page
+   * is asking for a Google password.
+   *
+   * The sign-in flow is the one screen in the app that shows a credential field,
+   * and it belongs to Google rather than to us: the WebView renders it and
+   * nothing in JavaScript can stop the frame being captured. FLAG_SECURE can,
+   * and it is the only thing that can.
+   *
+   * Driven off `url` rather than off the navigation callback so that both routes
+   * are covered — a full page load reports through `onNavigationStateChange`, an
+   * in-page SPA navigation through the NAV_SCRIPT message, and both land here.
+   */
+  useEffect(() => {
+    setSecureWindow(isSignInPage(url));
+  }, [url]);
+
+  /**
+   * The flag lives on the activity window, not on this component, so it has to
+   * be given back — otherwise a screen that unmounts mid-sign-in leaves the
+   * whole app unscreenshottable with nothing on screen to explain it.
+   */
+  useEffect(() => () => setSecureWindow(false), []);
+
+  /**
+   * Signing out, which until now there was no way to do.
+   *
+   * The WebView keeps a signed-in YouTube session across restarts by design —
+   * that is the pair that makes the app land on the user's own home feed. What
+   * was missing was the other direction. "Clear storage" was the only exit and
+   * it also deletes every automatic save the user has, so in practice a phone
+   * that had been signed in stayed signed in.
+   *
+   * The remount is not cosmetic and its ordering is load-bearing: the page
+   * currently on screen is authenticated, and left running it writes its cookies
+   * straight back. So the native call resolves first — it resolves on the main
+   * thread, after the removal — and only then does the WebView reload.
+   */
+  const signOut = useCallback(() => {
+    Alert.alert(
+      'Sign out of YouTube?',
+      'This device forgets the session: cookies, site data, and the copy the ' +
+        'download engine is handed. Your library and your downloads stay.\n\n' +
+        'It does not sign you out at Google — only Google can end the session ' +
+        'there, from your account’s device list.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Sign out',
+          style: 'destructive',
+          onPress: () => {
+            void signOutOfYouTube()
+              .then(() => {
+                setEntry(HOME_URL);
+                setUrl(HOME_URL);
+                setWebviewKey((k) => k + 1);
+                // Onto Browse, because the result is the thing to show: a
+                // signed-out YouTube is the only proof the user can check, and
+                // the notice strip only draws there.
+                setScreen('browse');
+                flashNotice('Signed out on this device');
+              })
+              .catch((e) => {
+                log.warn('ui', 'sign out failed', log.describe(e));
+                flashNotice('Couldn’t sign out. Nothing was changed.');
+              });
+          },
+        },
+      ],
+    );
+  }, [flashNotice]);
 
   /**
    * The page a "save anyway" has already been granted for.
@@ -797,10 +1025,16 @@ export function BrowserScreen() {
 
   const onMessage = useCallback(
     (event: WebViewMessageEvent) => {
-      let message: NavMessage | PoTokenMessage | MediaMessage;
+      let message: NavMessage | PoTokenMessage | MediaMessage | FullscreenMessage;
       try {
         message = JSON.parse(event.nativeEvent.data);
       } catch {
+        return;
+      }
+
+      if (message.type === 'fullscreen') {
+        setIsFullscreen(message.isFullscreen);
+        setScreenOrientation(message.isFullscreen ? message.orientation : 'portrait');
         return;
       }
 
@@ -877,9 +1111,38 @@ export function BrowserScreen() {
       }
 
       if (message.type === 'potoken') {
-        // Keep whichever values we have; a later message may only carry one.
-        if (message.poToken) token.current.poToken = message.poToken;
-        if (message.visitorData) token.current.visitorData = message.visitorData;
+        // Filed under the video it was minted for. `remember` merges, because
+        // visitorData arrives with the page and the token only once a player
+        // response does — routinely in separate messages.
+        remember(message.videoId, {
+          poToken: message.poToken,
+          visitorData: message.visitorData,
+          mintedAt: Date.now(),
+        });
+        /**
+         * Only when something changed, and never the token itself — this is the
+         * one line that says whether the harvest is working, and "no token"
+         * needs telling apart from "no media requests to harvest from".
+         *
+         * The signature is what keeps it to a handful of lines. The page
+         * re-reports once a second so that a hook firing late is not invisible,
+         * and `mediaSeen` climbs on every fragment: logging each of those would
+         * be a line a second, and the ring holds 900 of them. What is worth
+         * recording is the *shape* changing — a token appearing, a new harvest
+         * point firing — not the counter moving.
+         */
+        const sig = `${message.videoId}|${message.poToken ? 1 : 0}|${message.saw}`;
+        if (sig !== harvestSig.current && (message.poToken || message.saw)) {
+          harvestSig.current = sig;
+          log.info('token', 'harvest', {
+            videoId: message.videoId || 'unnamed',
+            got: message.poToken ? 'token' : 'nothing',
+            mediaSeen: message.mediaSeen,
+            // Which of the five hooks fired. Empty means none did, which is a
+            // different bug from all of them firing and finding nothing.
+            saw: message.saw || 'none',
+          });
+        }
         return;
       }
 
@@ -923,14 +1186,29 @@ export function BrowserScreen() {
     // `info` lets an instant download pass the formats it just resolved:
     // setMeta has not re-rendered yet at that point, so reading component
     // state here would look up the pick in the *previous* video's list.
-    async (pickId: string, info?: VideoMeta) => {
+    async (pickId: string, info?: VideoMeta, wantAudio?: boolean) => {
       const source = info ?? meta;
-      if (!source || !videoId) return;
+      if (!source || !videoId) {
+        log.warn('save', 'begin ignored: nothing resolved', { pickId, videoId });
+        return;
+      }
       const clean = pickId.replace(':explicit', '');
       const format = source.formats.find((f: Format) => f.id === clean);
-      if (!format) return;
+      if (!format) {
+        log.warn('save', 'begin ignored: pick is not in this manifest', {
+          pickId,
+          available: source.formats.map((f: Format) => f.id),
+        });
+        return;
+      }
 
-      const audioOnly = isAudioPick(clean, source.formats);
+      // The caller's intent wins where it has one. A tap on "instant: audio"
+      // can land on a *muxed* format — `bestAudio` falls back to one when the
+      // manifest has no audio-only stream — and reading the kind back off that
+      // format would answer "video" and save a file the user did not ask for.
+      // Only the sheet has no intent to pass: there the row that was tapped is
+      // the whole statement.
+      const audioOnly = wantAudio ?? isAudioPick(clean, source.formats);
       const label = audioOnly ? 'audio' : `${format.height}p`;
       const jobId = `${videoId}-${Date.now()}`;
 
@@ -938,11 +1216,31 @@ export function BrowserScreen() {
       // anything downloads. See src/core/trial.ts for why both.
       const refused = refuseSave(source.durationSeconds);
       if (refused) {
+        log.warn('save', 'refused by the trial', {
+          videoId,
+          seconds: source.durationSeconds,
+          reason: refused,
+        });
         setSheet(null);
         setDl(videoId ? 'ready' : 'idle');
         flashNotice(refused);
+        // This is the one refusal path with a human waiting on it, so it is the
+        // one that offers the way out. The three automatic paths below stay
+        // silent and leave the video unmarked, exactly as they did — a rule with
+        // no interface does not get one just because there is now something to
+        // sell.
+        setPaywall({ reason: refused });
         return;
       }
+
+      log.info('save', 'queued', {
+        jobId,
+        videoId,
+        title: source.title || title,
+        pick: clean,
+        audioOnly,
+        quality: label,
+      });
 
       setQuality(label);
       setSheet(null);
@@ -987,7 +1285,7 @@ export function BrowserScreen() {
               ref: { videoId: started, url, title: source.title || title },
               format,
               audioOnly,
-              token: token.current,
+              token: tokenNow(started),
               seconds: source.durationSeconds,
             },
             (p) => {
@@ -1011,6 +1309,7 @@ export function BrowserScreen() {
             const out = await job.promise;
             // Only a MediaStore record makes the file visible in Gallery.
             const uri = await publishToGallery(out.path, source.title || title, audioOnly);
+            log.info('save', 'published to the gallery', { jobId, uri, bytes: out.bytes });
             retire();
             finish({
               id: jobId,
@@ -1081,18 +1380,33 @@ export function BrowserScreen() {
       const jobId = `auto-${stat.id}-${Date.now()}`;
       const name = stat.title || 'Untitled';
 
+      // The replay rule is the one download path with no interface at all, so
+      // it is the one where the log *is* the interface. Everything it decides
+      // is recorded, including the decisions to do nothing.
+      const f = log.flow('replay', `auto-save ${stat.id}`, {
+        title: name,
+        starts: stat.starts,
+        music: stat.music,
+        keepAs: settings.keepAs,
+        audioQuality: settings.audioQuality,
+        videoQuality: settings.videoQuality,
+      });
+
       // Claimed before any slow work, so a second threshold crossing while this
       // is still extracting cannot start the same download twice.
       markSaved(stat.id);
 
       // Already on the device because the user asked for it. Downloading it a
       // second time would waste the bandwidth and produce a duplicate row.
-      if (records.some((r) => r.videoId === stat.id && r.state === 'saved')) return;
+      if (records.some((r) => r.videoId === stat.id && r.state === 'saved')) {
+        f.gaveUp('already saved');
+        return;
+      }
 
       try {
         const info = await listFormats(
           { videoId: stat.id, url: watchUrl, title: stat.title },
-          token.current,
+          tokenNow(stat.id),
         );
 
         const wantAudio =
@@ -1102,15 +1416,34 @@ export function BrowserScreen() {
         const format = wantAudio
           ? bestAudio(info.formats, kbpsFromQuality(settings.audioQuality))
           : bestVideo(info.formats, heightFromQuality(settings.videoQuality));
-        if (!format) return;
 
-        const audioOnly = format.kind === 'audio';
+        // A manifest with nothing in it at all. This used to `return` without a
+        // word, which is the single worst outcome the rule has: the user is
+        // told a video will be kept after N plays, the count reaches N, and
+        // nothing happens anywhere — no file, no row, no notice, and no line in
+        // any log to say why. Now it fails the way every other path fails, with
+        // a row in Library that names the reason.
+        if (!format) {
+          throw stated(
+            wantAudio
+              ? 'No audio stream was offered for this video'
+              : 'No video stream was offered for this video',
+          );
+        }
+
+        // What was asked for, not what the pick carries — see saveFromCard.
+        const audioOnly = wantAudio;
         const label = audioOnly ? 'audio' : `${format.height}p`;
 
-        // The rule has no interface, so a trial refusal here says nothing and
-        // simply does not save. The video stays unmarked, so it is retried
-        // once the tester has a full copy.
-        if (refuseSave(info.durationSeconds)) return;
+        // The rule has no interface, so a trial refusal is not an error worth a
+        // failed row — but it is worth a line. The video stays unmarked, so it
+        // is retried once the tester has a full copy.
+        const refused = refuseSave(info.durationSeconds);
+        if (refused) {
+          f.gaveUp('refused by the trial', { reason: refused, seconds: info.durationSeconds });
+          setJobs((prev) => prev.filter((j) => j.id !== jobId));
+          return;
+        }
 
         const job = startDownload(
           {
@@ -1118,7 +1451,7 @@ export function BrowserScreen() {
             ref: { videoId: stat.id, url: watchUrl, title: info.title || name },
             format,
             audioOnly,
-            token: token.current,
+            token: tokenNow(stat.id),
             seconds: info.durationSeconds,
           },
           (p) => {
@@ -1163,10 +1496,15 @@ export function BrowserScreen() {
           },
           ...prev,
         ]);
-        console.log(`[spool] auto-saved ${stat.id} after ${stat.starts} plays`);
+        f.ok('kept', { bytes: out.bytes, quality: label, plays: stat.starts });
       } catch (e: any) {
         setJobs((prev) => prev.filter((j) => j.id !== jobId));
-        if (e?.code === 'E_CANCELLED') return;
+        if (e?.code === 'E_CANCELLED') {
+          f.gaveUp('cancelled');
+          return;
+        }
+        if (e?.code === 'E_STATED') f.gaveUp(String(e.message));
+        else f.fail(e);
         // Recorded rather than swallowed: an automatic save that fails silently
         // leaves the user believing they have a file they do not have. It stays
         // marked as taken, so this does not become a retry loop.
@@ -1178,7 +1516,7 @@ export function BrowserScreen() {
             audioOnly: settings.keepAs !== 'video',
             savedAt: Date.now(),
             state: 'failed',
-            error: readableError(e, 'download'),
+            error: e?.code === 'E_STATED' ? String(e.message) : readableError(e, 'download'),
             auto: true,
             videoId: stat.id,
           },
@@ -1236,10 +1574,22 @@ export function BrowserScreen() {
 
       const retire = () => setJobs((prev) => prev.filter((j) => j.id !== jobId));
 
+      const f = log.flow('card', `save ${video.id}`, {
+        title: name,
+        keepAs: settings.keepAs,
+      });
+
+      // Waits for the single native slot. The row above is already on the list,
+      // so the card's button is unavailable for the whole wait rather than only
+      // once this starts — which is the behaviour the claim was written for and
+      // did not previously have while another job ran.
+      const release = await takeSlot();
+      f.step('slot acquired');
+
       try {
         const info = await listFormats(
           { videoId: video.id, url: watchUrl, title: video.title },
-          token.current,
+          tokenNow(video.id),
         );
 
         // What the page called itself decides what "Match" keeps, the same way
@@ -1253,7 +1603,10 @@ export function BrowserScreen() {
           : bestVideo(info.formats, heightFromQuality(settings.videoQuality));
         if (!format) throw stated('This page has no downloadable media');
 
-        const audioOnly = format.kind === 'audio';
+        // What was asked for, not what the pick happens to carry: `bestAudio`
+        // answers with a muxed format when the manifest holds nothing else, and
+        // `-x` still extracts the audio from it.
+        const audioOnly = wantAudio;
         const label = audioOnly ? 'audio' : `${format.height}p`;
 
         // Checked here so a refused save is recorded with a reason a tester can
@@ -1267,7 +1620,7 @@ export function BrowserScreen() {
             ref: { videoId: video.id, url: watchUrl, title: info.title || name },
             format,
             audioOnly,
-            token: token.current,
+            token: tokenNow(video.id),
             seconds: info.durationSeconds,
           },
           (p) => {
@@ -1304,10 +1657,15 @@ export function BrowserScreen() {
           },
           ...prev,
         ]);
-        console.log(`[spool] saved ${video.id} from the notification`);
+        f.ok('saved from the notification', { bytes: out.bytes, quality: label });
       } catch (e: any) {
         retire();
-        if (e?.code === 'E_CANCELLED') return;
+        if (e?.code === 'E_CANCELLED') {
+          f.gaveUp('cancelled');
+          return;
+        }
+        if (e?.code === 'E_STATED') f.gaveUp(String(e.message));
+        else f.fail(e);
         /**
          * Recorded rather than swallowed. The user is not looking at the app —
          * a failure that leaves no trace means they find out when they go
@@ -1331,9 +1689,11 @@ export function BrowserScreen() {
           },
           ...prev,
         ]);
+      } finally {
+        release();
       }
     },
-    [],
+    [takeSlot],
   );
 
   cardSave.current = saveFromCard;
@@ -1354,12 +1714,13 @@ export function BrowserScreen() {
     setError(null);
     setDl('resolving');
     try {
-      const info = await listFormats({ videoId, url, title }, token.current);
+      const info = await listFormats({ videoId, url, title }, tokenNow(videoId));
       setMeta(info);
       setDl('ready');
       setSheet(info.formats.length ? 'quick' : 'empty');
     } catch (e) {
       setError(readableError(e));
+      setErrorStale(looksStale(e));
       setDl('failed');
       setSheet('error');
     }
@@ -1376,8 +1737,26 @@ export function BrowserScreen() {
     setError(null);
     setDl('resolving');
     try {
-      const info = await listFormats({ videoId, url, title }, token.current);
+      const info = await listFormats({ videoId, url, title }, tokenNow(videoId));
       setMeta(info);
+
+      // Already on its way. `findDuplicate` reads `records`, which only holds
+      // rows that have *finished*, so a job still in flight was invisible to it
+      // — and a second tap on a page whose download had not landed yet went
+      // straight past. Measured: a retry and a tap on the same video produced
+      // two identical 48 MB files, of which the library then showed one row and
+      // the other was disk nobody could see or reach.
+      //
+      // Same shape of answer as a duplicate below: the first tap explains and
+      // the second commits, because wanting a second copy is unusual but not
+      // forbidden.
+      const inFlight = jobs.find((j) => j.videoId === videoId);
+      if (inFlight && confirmed.current !== videoId) {
+        confirmed.current = videoId;
+        setDl('ready');
+        flashNotice(`Already downloading “${inFlight.title}”`, 5000);
+        return;
+      }
 
       // A tap commits, so this is the last place a duplicate can be caught
       // before one is made. An exact match never gets here — the button is
@@ -1407,13 +1786,14 @@ export function BrowserScreen() {
         setSheet(info.formats.length ? 'quick' : 'empty');
         return;
       }
-      await beginDownload(format.id, info);
+      await beginDownload(format.id, info, settings.instant === 'audio');
     } catch (e) {
       setError(readableError(e));
+      setErrorStale(looksStale(e));
       setDl('failed');
       setSheet('error');
     }
-  }, [videoId, url, title, clearTimers, beginDownload, records, flashNotice]);
+  }, [videoId, url, title, clearTimers, beginDownload, records, jobs, flashNotice]);
 
 
   /**
@@ -1443,9 +1823,23 @@ export function BrowserScreen() {
    * keeping the audio is a real thing to want, and it is one three-second press
    * away — it is only the accidental second tap that is worth refusing.
    */
+  /**
+   * What the button shows.
+   *
+   * **A file on the device outranks a stale verdict about it.** This used to
+   * promote `alreadySaved` to "done" only from the `ready` state, so a download
+   * that failed and was then rescued by *Try again* in Library left the FAB on
+   * this page still showing the amber retry icon — telling the user it failed
+   * while the file sat in their library. Measured on the emulator immediately
+   * after a successful retry.
+   *
+   * `resolving` and `working` still win, because those describe something
+   * happening *now* and the ring is the honest thing to draw. Every other state
+   * is a claim about the past that the library has already overruled.
+   */
   const fabState: DownloadState = !videoId
     ? 'idle'
-    : dl === 'ready' && alreadySaved
+    : alreadySaved && dl !== 'resolving' && dl !== 'working'
       ? 'done'
       : dl;
 
@@ -1625,10 +2019,21 @@ export function BrowserScreen() {
       const settings = settingsRef.current;
       forget(record.id);
 
+      const f = log.flow('retry', `${record.videoId}`, {
+        title: record.title,
+        audioOnly: record.audioOnly,
+        was: record.error,
+      });
+
+      // The same single slot everything else takes. *Try again* sits in Library
+      // and is reachable while a download is already running, which is exactly
+      // how two jobs used to end up sharing one native service.
+      const release = await takeSlot();
+
       try {
         const info = await listFormats(
           { videoId: record.videoId, url: watchUrl, title: record.title },
-          token.current,
+          tokenNow(record.videoId),
         );
         const format = record.audioOnly
           ? bestAudio(info.formats, kbpsFromQuality(settings.audioQuality))
@@ -1636,8 +2041,16 @@ export function BrowserScreen() {
         if (!format) throw new Error('No downloadable format');
 
         const label = record.audioOnly ? 'audio' : `${format.height}p`;
+        // A person tapped *Try again* and is looking at the row, so this is a
+        // refusal with a human waiting — it offers the way out, as the FAB does.
+        // `stated`, or `readableError` has no branch for the sentence and the
+        // row comes back reading "check free space and connection": measured,
+        // a retry of a too-long video looked like a button that did nothing.
         const refused = refuseSave(info.durationSeconds);
-        if (refused) throw new Error(refused);
+        if (refused) {
+          setPaywall({ reason: refused });
+          throw stated(refused);
+        }
 
         const job = startDownload(
           {
@@ -1645,7 +2058,7 @@ export function BrowserScreen() {
             ref: { videoId: record.videoId, url: watchUrl, title: info.title || record.title },
             format,
             audioOnly: record.audioOnly,
-            token: token.current,
+            token: tokenNow(record.videoId),
             seconds: info.durationSeconds,
           },
           (p) => {
@@ -1698,22 +2111,30 @@ export function BrowserScreen() {
           },
           ...prev.filter((r) => !(r.videoId && r.videoId === record.videoId)),
         ]);
+        f.ok('retry succeeded', { bytes: out.bytes, quality: label });
       } catch (e: any) {
         setJobs((prev) => prev.filter((j) => j.id !== jobId));
-        if (e?.code === 'E_CANCELLED') return;
+        if (e?.code === 'E_CANCELLED') {
+          f.gaveUp('cancelled');
+          return;
+        }
+        if (e?.code === 'E_STATED') f.gaveUp(String(e.message));
+        else f.fail(e);
         setRecords((prev) => [
           {
             ...record,
             id: jobId,
             savedAt: Date.now(),
             state: 'failed',
-            error: readableError(e, 'download'),
+            error: e?.code === 'E_STATED' ? String(e.message) : readableError(e, 'download'),
           },
           ...prev,
         ]);
+      } finally {
+        release();
       }
     },
-    [forget],
+    [forget, takeSlot],
   );
 
   const library: LibraryItem[] = useMemo(
@@ -1832,6 +2253,48 @@ export function BrowserScreen() {
     },
     [records, artistFor, flashNotice],
   );
+
+  /**
+   * The flight recorder, as a file in Downloads/Spool.
+   *
+   * The previous run is included and comes first — see `log.dump`. A crash ends
+   * the process, so by the time anyone taps this the interesting session is the
+   * one that is no longer running, and exporting only the current one would
+   * reliably hand over the log of the app working.
+   */
+  const exportDiagnostics = useCallback(() => {
+    void (async () => {
+      try {
+        const prev = await log.previous();
+        const body = log.dump(prev, log.entries(), {
+          app: `Spool ${Platform.OS} api ${Platform.Version}`,
+          engine: engine.version,
+          trial: (() => {
+            const t = trial();
+            return t.trial ? `yes, ${t.used}/${t.maxDownloads} used, intact=${t.intact}` : 'no';
+          })(),
+          settings: JSON.stringify(settingsRef.current),
+          records: `${records.length} (${records.filter((r) => r.state === 'failed').length} failed)`,
+        });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const name = `spool-log-${stamp}.txt`;
+        await writeTextFile(name, 'text/plain', body);
+        flashNotice(`Wrote ${name} to Downloads/Spool`, 6000);
+      } catch (e: any) {
+        // Nothing here can be allowed to throw into the tap handler: this is
+        // the button someone reaches for when the app is already misbehaving.
+        log.warn('diag', 'export failed', log.describe(e));
+        flashNotice(e?.message ?? 'Could not write the log');
+      }
+    })();
+  }, [engine.version, records, flashNotice]);
+
+  /** What the row says it would write, before it writes it. */
+  const diagnosticsSummary = useMemo(() => {
+    const all = log.entries();
+    const bad = all.filter((e) => e.level === 'error').length;
+    return bad ? `${all.length} entries · ${bad} error${bad === 1 ? '' : 's'}` : `${all.length} entries`;
+  }, [records, jobs, screen]);
 
   const exportEverything = useCallback(() => {
     const backup = buildBackup(playlists, records, Date.now(), artistFor);
@@ -2009,10 +2472,17 @@ export function BrowserScreen() {
     // Searching a music library by artist is not a refinement, it is half of
     // what the field is for — "arijit" finding nothing in a library full of him
     // reads as the search being broken rather than as a title-only search.
+    //
+    // Every word, anywhere, in any order — not the query as one substring.
+    // "jana gana mana anthem" found nothing over "Jana Gana Mana - National
+    // Anthem" (measured on the S21 FE), because the phrase is not contiguous
+    // there; nor would "arijit tum hi ho", split across artist and title. A
+    // one-word query matches exactly what it did before.
+    const words = q.split(/\s+/);
     return saved
       .filter((r) => {
-        const artist = artistFor(r)?.toLowerCase() ?? '';
-        return r.title.toLowerCase().includes(q) || artist.includes(q);
+        const haystack = `${r.title} ${artistFor(r) ?? ''}`.toLowerCase();
+        return words.every((w) => haystack.includes(w));
       })
       .map((r) => ({
         id: r.id,
@@ -2072,23 +2542,44 @@ export function BrowserScreen() {
   if (!booted) return <View style={[styles.root, { backgroundColor: t.chrome }]} />;
 
   if (screen === 'firstrun') {
+    /**
+     * The tail of first run, and every line of it is load-bearing in order.
+     *
+     * Permissions are requested here rather than at boot because the boot
+     * effect runs before the user has agreed to anything — which is why
+     * `adoptFromGallery` has to run *again* right after them. Measured on a
+     * reinstall: 0 adopted on the first launch, 43 on the next, because the
+     * only scan happened before `READ_MEDIA_*` existed.
+     *
+     * `showOffer` is the whole reason this moved out of the JSX. The premium
+     * step has just made this pitch, so raising a sheet as well would sell to
+     * the same person twice inside ten seconds — the failure the paywall
+     * section already names. The sheet is now raised only when the user asked
+     * for it, and which sheet depends on which offer this build actually has.
+     */
+    const finishFirstRun = async (showOffer: boolean) => {
+      await markFirstRunSeen();
+      await requestNotificationPermission();
+      await requestMediaPermissions();
+      setScreen('browse');
+      // Only now can the gallery be read; the boot scan ran before the
+      // user had granted anything.
+      adoptFromGallery();
+      if (!showOffer) return;
+      if (trial().trial) setPreRelease(true);
+      else setPaywall({});
+    };
+
     return (
       <SafeAreaView
         style={[styles.root, { backgroundColor: t.chrome }]}
         edges={['top', 'bottom']}
       >
-        <FirstRunScreen
-          onStart={async () => {
-            await markFirstRunSeen();
-            await requestNotificationPermission();
-            await requestMediaPermissions();
-            setScreen('browse');
-            // Only now can the gallery be read; the boot scan ran before the
-            // user had granted anything.
-            adoptFromGallery();
-            if (trial().trial) setPreRelease(true);
-          }}
-          onChooseFolder={() => flashNotice('Files are saved to Movies/Spool')}
+        <OnboardingScreen
+          entitled={licence().entitled}
+          trial={trial().trial}
+          onDone={() => void finishFirstRun(false)}
+          onSeeOffer={() => void finishFirstRun(true)}
         />
       </SafeAreaView>
     );
@@ -2097,7 +2588,7 @@ export function BrowserScreen() {
   return (
     <SafeAreaView
       style={[styles.root, { backgroundColor: t.chrome }]}
-      edges={['top', 'bottom']}
+      edges={isFullscreen ? [] : ['top', 'bottom']}
     >
       <View style={styles.page}>
         {/* Never unmounted — leaving Downloads must not cost a page reload. */}
@@ -2132,7 +2623,7 @@ export function BrowserScreen() {
         {/* The FAB is the manual path and lives only in Browse. Inert at line
             colour on a feed; filled and tinted once a watch page resolves —
             that state change is the only notice that something can be kept. */}
-        {screen === 'browse' && (
+        {screen === 'browse' && !isFullscreen && (
           <Animated.View
             style={[
               styles.fabSlot,
@@ -2277,6 +2768,9 @@ export function BrowserScreen() {
               // nothing is a row that does nothing.
               onExport={playlists.length ? exportEverything : undefined}
               exportSummary={describeExport(playlists, records)}
+              onDiagnostics={exportDiagnostics}
+              diagnosticsSummary={diagnosticsSummary}
+              onSignOut={signOut}
               // No capacity figure without a native StatFs call, so the meter
               // stays off rather than inventing one. See docs/UI.md §04.
               storage={{ ours: null, others: 0, used: librarySummary, free: '' }}
@@ -2353,9 +2847,88 @@ export function BrowserScreen() {
         />
       )}
 
-      {!videoOpen && <TabBar value={screen} onChange={setScreen} />}
+      {!videoOpen && !isFullscreen && <TabBar value={screen} onChange={setScreen} />}
 
-      {preRelease && <PreReleaseSheet onClose={() => setPreRelease(false)} />}
+      {appLocked && (
+        <View
+          style={[
+            StyleSheet.absoluteFill,
+            {
+              backgroundColor: t.chrome,
+              zIndex: 998,
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 24,
+            },
+          ]}
+        >
+          <MaterialIcons name="lock" size={56} color={t.accent} />
+          <Text
+            style={{
+              color: t.accent,
+              fontSize: 13,
+              fontWeight: '700',
+              letterSpacing: 1.5,
+              marginTop: 16,
+            }}
+          >
+            SPOOL
+          </Text>
+          <Text
+            style={{
+              color: t.on,
+              fontSize: 20,
+              fontWeight: '700',
+              marginTop: 8,
+              textAlign: 'center',
+            }}
+          >
+            Subscription Required
+          </Text>
+          <Text
+            style={{
+              color: t.onDim,
+              fontSize: 14,
+              marginTop: 8,
+              textAlign: 'center',
+              lineHeight: 20,
+            }}
+          >
+            Your free trial has ended. An active subscription is required to unlock Spool, play
+            background music, and download.
+          </Text>
+          <Pressable
+            onPress={() => setPaywall({ reason: 'Free trial ended' })}
+            style={{
+              backgroundColor: t.accent,
+              paddingHorizontal: 24,
+              paddingVertical: 12,
+              borderRadius: radius.pill,
+              marginTop: 24,
+            }}
+          >
+            <Text style={{ color: t.onAccent, fontWeight: '700', fontSize: 15 }}>
+              Subscribe / Sign in
+            </Text>
+          </Pressable>
+        </View>
+      )}
+
+      {preRelease && !appLocked && <PreReleaseSheet onClose={() => setPreRelease(false)} />}
+
+      {(paywall || (appLocked && !accountSheet)) && (
+        <SubscribeSheet
+          reason={paywall?.reason}
+          canClose={!appLocked}
+          onClose={() => setPaywall(null)}
+        />
+      )}
+
+      {accountSheet && (
+        <AccountSheet intent={accountSheet} onClose={() => setAccountSheet(null)} />
+      )}
+
+      {playNotice && <PlayLockSheet notice={playNotice} />}
 
       <QualitySheet
         mode={sheet}
@@ -2376,6 +2949,8 @@ export function BrowserScreen() {
         emptyReason={
           error ?? 'This page has no downloadable media — it may be live or members-only.'
         }
+        errorReason={error}
+        errorStale={errorStale}
         onPick={beginDownload}
         onExpand={() => setSheet('all')}
         onCollapse={() => setSheet('quick')}
@@ -2585,21 +3160,49 @@ function offerSavedActions(
  * A page being played has no library row behind it, so the two library actions
  * are absent rather than inert — which leaves the sleep timer, and that is
  * reason enough for the menu to exist.
+ *
+ * **Android draws at most three buttons in an Alert and drops the rest without
+ * a word.** With Cancel, Remove, Add to playlist and Sleep timer, the timer —
+ * last — was never on screen for a library track, so it could not be armed at
+ * all: measured on the S21 FE. See `offerMenu`. The timer leads so that, with
+ * Cancel gone, it takes Cancel's place and Remove and Add stay where they were.
  */
 function offerPlayingActions(
   record: DownloadRecord | undefined,
   on: { sleep: () => void; file?: () => void; remove?: () => void },
 ) {
-  const buttons: { text: string; style?: 'cancel' | 'destructive'; onPress?: () => void }[] = [
-    { text: 'Cancel', style: 'cancel' },
-  ];
+  const actions: MenuButton[] = [{ text: 'Sleep timer', onPress: on.sleep }];
   if (on.remove) {
-    buttons.push({ text: 'Remove from library', style: 'destructive', onPress: on.remove });
+    actions.push({ text: 'Remove from library', style: 'destructive', onPress: on.remove });
   }
-  if (on.file) buttons.push({ text: 'Add to playlist', onPress: on.file });
-  buttons.push({ text: 'Sleep timer', onPress: on.sleep });
+  if (on.file) actions.push({ text: 'Add to playlist', onPress: on.file });
+  offerMenu(record?.title ?? 'Playing', undefined, actions);
+}
 
-  Alert.alert(record?.title ?? 'Playing', undefined, buttons);
+type MenuButton = { text: string; style?: 'cancel' | 'destructive'; onPress?: () => void };
+
+/**
+ * An Alert used as a menu.
+ *
+ * **Android draws at most three buttons and drops the rest without a word** —
+ * no warning, no error, the action is simply not there. Three menus in this
+ * file had four, and each lost its last action: the sleep timer could not be
+ * armed from the full player, a playlist could not be renamed, and a track in
+ * the middle of a playlist could not be moved up. So a menu with three actions
+ * goes without an explicit Cancel and is dismissed by Back or a tap outside,
+ * and one with more is a bug this refuses to hide: it logs, and the extra
+ * actions are the ones to move into a sheet.
+ */
+function offerMenu(title: string, message: string | undefined, actions: MenuButton[]) {
+  if (actions.length > 3) {
+    log.warn('ui', 'menu has more actions than Android can draw', {
+      title,
+      dropped: actions.slice(3).map((a) => a.text),
+    });
+  }
+  const buttons: MenuButton[] =
+    actions.length < 3 ? [{ text: 'Cancel', style: 'cancel' }, ...actions] : actions;
+  Alert.alert(title, message, buttons, { cancelable: true });
 }
 
 /** Rename or delete, from either the section row or the open playlist. */
@@ -2607,8 +3210,9 @@ function offerPlaylistActions(
   list: Playlist,
   on: { rename: () => void; exportOne: () => void; remove: () => void },
 ) {
-  Alert.alert(list.name, undefined, [
-    { text: 'Cancel', style: 'cancel' },
+  // Three actions, so no Cancel — see `offerMenu`. Rename was the fourth
+  // button and was never drawn.
+  offerMenu(list.name, undefined, [
     {
       text: 'Delete playlist',
       style: 'destructive',
@@ -2646,14 +3250,15 @@ function offerTrackInPlaylist(
   total: number,
   on: { move: (delta: number) => void; remove: () => void },
 ) {
-  const buttons: { text: string; style?: 'cancel' | 'destructive'; onPress?: () => void }[] = [
-    { text: 'Cancel', style: 'cancel' },
+  // A track in the middle has three actions, and the fourth button — Move up —
+  // was never drawn. See `offerMenu`.
+  const actions: MenuButton[] = [
     { text: 'Remove from playlist', style: 'destructive', onPress: on.remove },
   ];
-  if (at < total - 1) buttons.push({ text: 'Move down', onPress: () => on.move(1) });
-  if (at > 0) buttons.push({ text: 'Move up', onPress: () => on.move(-1) });
+  if (at < total - 1) actions.push({ text: 'Move down', onPress: () => on.move(1) });
+  if (at > 0) actions.push({ text: 'Move up', onPress: () => on.move(-1) });
 
-  Alert.alert(r.title, `${at + 1} of ${total} in “${list.name}”`, buttons);
+  offerMenu(r.title, `${at + 1} of ${total} in “${list.name}”`, actions);
 }
 
 /**
@@ -2783,11 +3388,41 @@ function FabRing({ value, colour }: { value: number; colour: string }) {
  * fallback names the two things that actually go wrong at that stage rather
  * than guessing at a third.
  */
+/**
+ * Whether a stale extractor is a plausible cause of this failure.
+ *
+ * The error sheet used to assert "YouTube changed something" for everything and
+ * offer *Update engine* as the first action. Measured with the network off: the
+ * app blamed YouTube for a change it had not made, and offered an update that
+ * needed the connection it had just failed to use.
+ *
+ * The list is of failures the engine is *innocent* of — a dead connection, a
+ * video that is private or members-only, a live stream, a filename the
+ * filesystem refused, a full disk. Everything else keeps the benefit of the
+ * doubt, because a genuinely stale extractor produces error text nobody can
+ * enumerate in advance and the update is cheap and safe.
+ */
+function looksStale(e: unknown): boolean {
+  const text = (e instanceof Error ? e.message : String(e ?? '')).toLowerCase();
+  // `postprocessing` and `conversion` belong here for the same reason the
+  // network and disk phrases do: they name a failure that happened *after* the
+  // extractor did its job, so offering to replace the extractor is advice that
+  // cannot help and takes a minute to not help.
+  return !/network|resolve host|hostname|unreachable|connection|timed out|private|members.only|live|space|enospc|name too long|enametoolong|postprocessing|conversion failed/.test(
+    text,
+  );
+}
+
 function readableError(e: unknown, stage: 'resolve' | 'download' = 'resolve'): string {
   const raw = e instanceof Error ? e.message : String(e ?? '');
   // yt-dlp's real message is the only useful diagnostic when extraction breaks,
-  // and the user-facing string deliberately throws it away.
-  console.warn(`[spool] engine error (${stage}):`, raw);
+  // and the user-facing string deliberately throws it away. The native `code`
+  // goes with it: `E_NO_OUTPUT`, `E_TRIAL_TOO_LONG` and `E_DOWNLOAD` are three
+  // very different failures that can reach the same copy.
+  log.error('engine', `error while ${stage === 'download' ? 'downloading' : 'resolving'}`, {
+    stage,
+    ...log.describe(e),
+  });
   const text = raw.toLowerCase();
   if (text.includes('sign in') || text.includes('bot')) return 'Sign-in required for this video';
   if (text.includes('private')) return 'This video is private';
@@ -2811,6 +3446,27 @@ function readableError(e: unknown, stage: 'resolve' | 'download' = 'resolve'): s
   }
   if (text.includes('space') || text.includes('enospc')) return 'Not enough storage';
   if (text.includes('no file')) return 'The engine produced no file';
+  // Two failures that reached the free-space copy on a phone with 26 GB free,
+  // which is how "downloads are broken" got investigated as a storage problem
+  // three separate times. Both are about the *manifest*, and neither has
+  // anything to do with the disk or the network the fallback names.
+  if (text.includes('format is not available') || text.includes('no video formats')) {
+    return 'YouTube didn’t offer a usable stream — try again';
+  }
+  if (text.includes('name too long') || text.includes('enametoolong')) {
+    return 'That title is too long for the filesystem';
+  }
+  // The fourth failure to reach the free-space copy while having nothing to do
+  // with free space. `Postprocessing: Conversion failed!` is ffmpeg, after the
+  // media is already on disk -- measured on a 31-minute save whose 73 MB of
+  // audio was complete and correct, and whose only real problem was that the
+  // cover art would not embed. A complete file is now kept rather than
+  // discarded (see `finished` in YtDlpModule.kt), so reaching this line at all
+  // means the failure was earlier than that; either way it is the engine's
+  // conversion and not the user's phone.
+  if (text.includes('postprocessing') || text.includes('conversion failed')) {
+    return 'The engine couldn’t finish converting this one';
+  }
   return stage === 'download'
     ? 'Didn’t finish — check free space and connection'
     : 'Couldn’t read this video — try updating the engine';

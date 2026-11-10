@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { AppState } from 'react-native';
 import { createAudioPlayer, setAudioModeAsync, type AudioPlayer,
   preload,
   clearPreloadedSource,
@@ -16,6 +17,9 @@ import { createVideoPlayer, type VideoPlayer } from 'expo-video';
 import { saveSession } from '../core/storage';
 import { artworkFor, onArtworkChange } from '../core/artwork';
 import { onNotificationCommand, publishNowPlaying, releaseNowPlaying } from './nowPlaying';
+import { HEARTBEAT_MS, beat, claimPlay, playPermitted, releasePlay } from '../core/playLock';
+import { licence, openPaywall } from '../core/license';
+import { isAppLocked } from '../core/trial';
 
 /**
  * Playback for downloaded media.
@@ -80,6 +84,9 @@ const SESSION_FLUSH_MS = 5000;
  * playback bug this file has already had.
  */
 const NOTIFICATION_TICK_MS = 1000;
+
+/** How long a dropped audio player waits to be released. See `dropAudio`. */
+const RELEASE_AFTER_MS = 2000;
 
 type PlayerApi = {
   /** Set only while the current track is audio. */
@@ -203,6 +210,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, []);
   const silenceOthers = useCallback(() => gate.current?.(), []);
 
+  /**
+   * The account play lock (`core/playLock`). True means "stop here": this
+   * device does not already hold the lock, so it is being asked for, and
+   * `again` re-runs the refused action once — and only if — it is granted.
+   *
+   * Checked before `silenceOthers` on purpose: a start that turns out to be
+   * refused must not have paused the page on its way to doing nothing. The
+   * fast path is synchronous, so a device that already holds a lease — or is
+   * signed out, which is most of them — starts exactly as quickly as before.
+   */
+  const lockPending = useCallback((again: () => void) => {
+    if (playPermitted()) return false;
+    void claimPlay(again).then((ok) => {
+      if (ok) again();
+    });
+    return true;
+  }, []);
+
   // Read by the session writer, which runs on a timer and would otherwise
   // persist whatever the queue was when its effect last ran.
   const queueRef = useRef<Track[]>([]);
@@ -212,9 +237,40 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const trackRef = useRef<Track | null>(track);
   trackRef.current = track;
 
+  /**
+   * `remove()` alone does not stop anything, and that is not obvious from its
+   * name. In expo-audio 57 on Android it only deletes the player from the
+   * module's table; the ExoPlayer underneath is released when the JS object is
+   * garbage-collected or explicitly `release()`d. Until then it plays on, with
+   * no control in the app able to reach it. Measured on the S21 FE: five
+   * stop-then-play rounds left six live players, the first of them still
+   * audible five minutes later with the screen off and the app's own player
+   * paused.
+   *
+   * So: silence it and drop it from the table now, and release the native side
+   * a moment later. Not in the same tick — the mini bar and the player screen
+   * subscribe to this object, and they only let go once React has re-rendered
+   * without it; an unsubscribe reaching an already-released object is a throw
+   * on a cleanup path. The pause is what stops the sound, so the delay costs
+   * nothing audible. Each step is guarded because this runs on teardown paths,
+   * where a player that is already gone must not stop the rest from running.
+   */
   const dropAudio = useCallback(() => {
-    liveAudio.current?.remove();
+    const p = liveAudio.current;
     liveAudio.current = null;
+    if (p) {
+      try {
+        p.pause();
+      } catch {}
+      try {
+        p.remove();
+      } catch {}
+      setTimeout(() => {
+        try {
+          p.release();
+        } catch {}
+      }, RELEASE_AFTER_MS);
+    }
     setPlayer(null);
   }, []);
 
@@ -369,9 +425,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (current && track?.id === next.id) {
         if (current.playing) {
           current.pause();
+          releasePlay();
           publish();
           return;
         }
+        if (lockPending(() => void toggleRef.current(next))) return;
         silenceOthers();
         if (next.kind === 'audio') await claimAudioSession();
         current.play();
@@ -382,6 +440,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      if (lockPending(() => void toggleRef.current(next))) return;
       silenceOthers();
 
       if (next.kind === 'video') {
@@ -449,21 +508,32 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       claimAudioSession,
       publish,
       silenceOthers,
+      lockPending,
     ],
   );
+  /** The latest `toggle`, for a play-lock retry that runs after a re-render. */
+  const toggleRef = useRef(toggle);
+  toggleRef.current = toggle;
 
   /**
    * The one play/pause every button routes through, so the notification claim
    * cannot be skipped by a surface that happens to hold the player object.
    */
   const togglePlayback = useCallback(() => {
+    if (isAppLocked()) {
+      openPaywall('Your free trial has ended. Subscribe to an active plan to continue listening.');
+      return;
+    }
+
     const audio = liveAudio.current;
     if (audio) {
       if (audio.playing) {
         audio.pause();
+        releasePlay();
         publish();
         return;
       }
+      if (lockPending(() => togglePlaybackRef.current())) return;
       silenceOthers();
       // Started before the session call resolves: waiting on it would put a
       // perceptible gap between the tap and the sound for no benefit, and the
@@ -479,14 +549,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (!v) return;
     if (v.playing) {
       v.pause();
+      releasePlay();
       publish();
       return;
     }
+    if (lockPending(() => togglePlaybackRef.current())) return;
     silenceOthers();
     v.play();
     if (trackRef.current) claimed.current = true;
     publish();
-  }, [claimAudioSession, publish, silenceOthers]);
+  }, [claimAudioSession, publish, silenceOthers, lockPending]);
+  const togglePlaybackRef = useRef(togglePlayback);
+  togglePlaybackRef.current = togglePlayback;
 
   /**
    * Pause whatever is playing, without going through `togglePlayback`.
@@ -500,8 +574,48 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const engine = liveAudio.current ?? liveVideo.current;
     if (!engine?.playing) return;
     engine.pause();
+    releasePlay();
     publish();
   }, [publish]);
+
+  const localBgBlockedRef = useRef(false);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      const gone = state !== 'active';
+      if (gone) {
+        if (!licence().entitled) {
+          const engine = liveAudio.current ?? liveVideo.current;
+          if (engine?.playing) {
+            pauseNow();
+            localBgBlockedRef.current = true;
+          }
+        }
+      } else {
+        if (localBgBlockedRef.current) {
+          localBgBlockedRef.current = false;
+          openPaywall(
+            'Background music requires an active plan. Subscribe to keep listening in the background.',
+          );
+        }
+      }
+    });
+    return () => sub.remove();
+  }, [pauseNow]);
+
+  /**
+   * The play lock's heartbeat, while anything is loaded. It runs whether or
+   * not the track is playing, because `beat` is also what releases the lease
+   * after a pause that came from a path which never said so. A timer the
+   * system delays just means a late renewal; see `core/playLock`.
+   */
+  useEffect(() => {
+    if (!track) return;
+    const timer = setInterval(() => {
+      const engine = liveAudio.current ?? liveVideo.current;
+      void beat(!!engine?.playing, pauseNow, () => togglePlaybackRef.current());
+    }, HEARTBEAT_MS);
+    return () => clearInterval(timer);
+  }, [track, pauseNow]);
 
   const setSleep = useCallback((after: number | 'track' | null) => {
     if (after === null) {
@@ -595,6 +709,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const stop = useCallback(() => {
     dropAudio();
     dropVideo();
+    releasePlay();
     claimed.current = false;
     trackRef.current = null;
     releaseNowPlaying('local');
@@ -823,6 +938,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const engine = liveAudio.current ?? liveVideo.current;
       switch (command) {
         case 'play':
+          if (!licence().entitled && AppState.currentState !== 'active') {
+            pauseNow();
+            return;
+          }
           if (engine && !engine.playing) togglePlayback();
           break;
         case 'pause':

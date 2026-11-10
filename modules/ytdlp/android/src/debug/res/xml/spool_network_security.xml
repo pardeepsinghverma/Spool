@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug builds only. This file replaces the release policy in src/main because
+  the debug source set of a library variant wins over main, and the app's debug
+  variant consumes the library's debug variant.
+
+  Why it has to exist at all: the licence server runs on Laragon over plain
+  HTTP during development, and from Android 9 the platform refuses cleartext by
+  default. The refusal surfaces as a thrown fetch, which `syncLicence` in
+  `src/core/license.ts` deliberately treats as "no news" and logs at debug level
+  — so without this the failure is indistinguishable from being offline, which
+  is the single most expensive way for a network problem to present itself.
+  A whole afternoon goes into "why does my server never get a request" when the
+  request was never allowed to leave the phone.
+
+  It permits cleartext to everything rather than to a named host on purpose. The
+  phone cannot resolve `spool.pardeep.app` — that is a hosts-file entry on the
+  developer's PC — so testing happens against whatever the LAN address of the
+  moment is, or 10.0.2.2 from the emulator, and a domain allowlist would have to
+  be edited every time the router hands out a new lease.
+
+  It is not a hole in the shipped app: release builds get src/main's policy,
+  which denies cleartext outright. Verify that after any change to the manifest
+  merger by checking the merged manifest of a release build, not this file.
+-->
+<network-security-config>
+  <base-config cleartextTrafficPermitted="true">
+    <trust-anchors>
+      <certificates src="system" />
+      <!--
+        Lets a locally-generated CA (Laragon's SSL, mitmproxy, Charles) be
+        trusted while debugging HTTPS. Debug only, and the release policy above
+        has no such entry.
+      -->
+      <certificates src="user" />
+    </trust-anchors>
+  </base-config>
+</network-security-config>

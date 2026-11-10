@@ -55,3 +55,10 @@ start.md
 # generated native folders
 /ios
 /android
+
+# Licence server secrets and local database. config.php holds the Razorpay
+# secret and the licence signing key; losing the latter means no new licence
+# can ever be signed, so back it up somewhere that is not a git remote.
+server/php/config.php
+server/php/data/
+.wrangler/

@@ -100,32 +100,62 @@ class DownloadService : Service() {
 
   private var currentTitle: String = "Downloading"
   private var currentId: String? = null
+  private var currentFraction: Double? = null
 
   override fun onBind(intent: Intent?): IBinder? = null
 
+  /**
+   * **Every command becomes foreground before it does anything else.**
+   *
+   * `startForegroundService()` starts a ~5 second timer, and if `startForeground()`
+   * has not been called by the time it expires Android throws
+   * `ForegroundServiceDidNotStartInTimeException` at the app's main thread and
+   * kills the process. That exception comes *from the system*, so no
+   * `runCatching` anywhere in this file can stop it — the only defence is to
+   * satisfy the contract, always, on the first thing that runs.
+   *
+   * It used to call `startForeground` on `ACTION_START` alone, which leaves two
+   * ways to die. A `STOP` arriving as the first command to a fresh instance —
+   * which is exactly what `stopServiceIfIdle()` sends when a download fails
+   * early — called `stopSelf()` having never gone foreground at all. And a
+   * `PROGRESS` that overtook its `START` did the same.
+   *
+   * Observed once on the emulator during a first-run download: the process died
+   * with this exception while yt-dlp was still spawning, taking the download and
+   * the whole app with it. Contended main threads make the window easy to miss
+   * and impossible to rely on, so nothing here may assume it is wide.
+   */
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     ensureChannels(this)
 
+    // Read what this command knows first, so the notification raised below is
+    // already correct rather than being corrected a frame later.
     when (intent?.action) {
       ACTION_START -> {
         currentId = intent.getStringExtra(EXTRA_ID)
         currentTitle = intent.getStringExtra(EXTRA_TITLE) ?: currentTitle
-        startForegroundCompat(build(currentTitle, null))
+        currentFraction = null
       }
 
       ACTION_PROGRESS -> {
         currentTitle = intent.getStringExtra(EXTRA_TITLE) ?: currentTitle
-        val fraction = intent.getDoubleExtra(EXTRA_FRACTION, -1.0)
-        getSystemService(NotificationManager::class.java)
-          .notify(ONGOING_ID, build(currentTitle, fraction.takeIf { it >= 0 }))
+        currentFraction = intent.getDoubleExtra(EXTRA_FRACTION, -1.0).takeIf { it >= 0 }
       }
+    }
 
+    // Unconditional, and before the dispatch below. On a stop this raises a
+    // notification that the same main-thread message immediately removes, so
+    // no frame is ever drawn with it — the cost is nothing and the alternative
+    // is a killed process.
+    startForegroundCompat(build(currentTitle, currentFraction))
+
+    when (intent?.action) {
       ACTION_CANCEL -> {
         currentId?.let { id -> runCatching { YtDlpCancelBus.cancel(id) } }
-        stopSelfCompat()
+        stopSelfCompat(startId)
       }
 
-      ACTION_STOP -> stopSelfCompat()
+      ACTION_STOP -> stopSelfCompat(startId)
     }
 
     return START_NOT_STICKY
@@ -153,22 +183,44 @@ class DownloadService : Service() {
       .build()
   }
 
+  /**
+   * `runCatching` for the same reason `PlaybackService` has it: an uncaught
+   * `ForegroundServiceStartNotAllowedException` takes the whole app down, and
+   * Android 12+ throws it for a service started from the background. That is a
+   * different failure from the timeout above — this one is throwable *by the
+   * call*, so it can be caught, and a download that runs without a notification
+   * is far better than a process that dies.
+   */
   private fun startForegroundCompat(notification: Notification) {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-      startForeground(ONGOING_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-    } else {
-      startForeground(ONGOING_ID, notification)
+    runCatching {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        startForeground(ONGOING_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+      } else {
+        startForeground(ONGOING_ID, notification)
+      }
     }
   }
 
-  private fun stopSelfCompat() {
+  /**
+   * `stopSelfResult(startId)`, never bare `stopSelf()`.
+   *
+   * Android records a `startForegroundService` as owing a `startForeground`
+   * when the call is *made*, and a service stopped while it owes one is killed
+   * on the spot — the same uncatchable exception as above. A STOP from the job
+   * that just ended, with the next job's START already issued behind it, is
+   * exactly that: a bare `stopSelf()` brought the service down owing the call.
+   * With the start id Android stops only if nothing has been started since,
+   * and the queued START then goes foreground again as its first act.
+   * `PlaybackService` died this way at track boundaries on a real phone.
+   */
+  private fun stopSelfCompat(startId: Int) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
       stopForeground(STOP_FOREGROUND_REMOVE)
     } else {
       @Suppress("DEPRECATION")
       stopForeground(true)
     }
-    stopSelf()
+    stopSelfResult(startId)
   }
 }
 

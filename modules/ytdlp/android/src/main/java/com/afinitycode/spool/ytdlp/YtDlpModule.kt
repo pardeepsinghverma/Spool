@@ -3,6 +3,7 @@ package com.afinitycode.spool.ytdlp
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
@@ -15,10 +16,14 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebView
 import java.lang.ref.WeakReference
 import androidx.palette.graphics.Palette
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.net.URL
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
@@ -45,6 +50,27 @@ class YtDlpModule : Module() {
   private companion object {
     /** Long enough to resume tomorrow, short enough not to hoard gigabytes. */
     const val PARTIAL_MAX_AGE_MS = 24L * 60 * 60 * 1000
+
+    /**
+     * Every name yt-dlp gives something that is not yet a download.
+     *
+     * Read off a real 360p save rather than from the documentation, because
+     * the list is longer than it looks:
+     *
+     *   ZbP4VNJhRUk.v360.f134.mp4.part   the video stream, arriving
+     *   ZbP4VNJhRUk.v360.f134.mp4        the video stream, whole
+     *   ZbP4VNJhRUk.v360.f251.webm       the audio stream, whole
+     *   ZbP4VNJhRUk.v360.temp.mp4        the merge, in progress
+     *   ZbP4VNJhRUk.v360.mp4             the download
+     *
+     * `.temp.` is the one that matters and the one that was missed. It is the
+     * merge ffmpeg is still writing, it carries the container extension of the
+     * real thing, and it does not match `.fNNN.` -- so a merge that failed
+     * halfway would have been rescued as a truncated video and published as a
+     * success. `.part-FragN` is here for the same reason: `File.extension`
+     * reads it as `part-Frag7`, so an extension test alone does not catch it.
+     */
+    val INTERMEDIATE = Regex("\\.f\\d+\\.|\\.temp\\.|\\.part(-Frag\\d+)?$|\\.ytdl$")
 
     /**
      * Short edge of a cached cover. The largest surface that shows one is the
@@ -143,6 +169,7 @@ class YtDlpModule : Module() {
      */
     AsyncFunction("listFormats") { url: String, poToken: String?, visitorData: String?, clients: String?, promise: Promise ->
       scope.launch {
+        var jar: File? = null
         try {
           ensureInitialised()
           val request = YoutubeDLRequest(url).apply {
@@ -150,12 +177,14 @@ class YtDlpModule : Module() {
             addOption("--no-warnings")
             addOption("--no-playlist")
             applyExtractorArgs(poToken, visitorData, clients)
-            applyBrowserSession()
+            jar = applyBrowserSession()
           }
           val response = YoutubeDL.getInstance().execute(request)
           promise.resolve(response.out)
         } catch (e: Throwable) {
           promise.reject("E_EXTRACT", e.message ?: "Extraction failed", e)
+        } finally {
+          CookieJar.discard(jar)
         }
       }
     }
@@ -179,22 +208,54 @@ class YtDlpModule : Module() {
       val seconds = (args["seconds"] as? Number)?.toInt() ?: 0
 
       /**
+       * The name this attempt writes under. Falls back to the job id, which is
+       * what it used to always be -- and being per-attempt, that guaranteed
+       * nothing ever resumed. See `partialKey` in src/core/ytdlp.ts.
+       *
+       * Filtered again here rather than trusted from the bridge: it becomes a
+       * path, and `..` in it would write outside the download directory.
+       */
+      val stem = (args["resumeKey"] as? String)
+        ?.filter { it.isLetterOrDigit() || it == '.' || it == '_' || it == '-' }
+        ?.replace("..", "")
+        ?.takeIf { it.isNotBlank() }
+        ?: id
+
+      /**
        * The trial is enforced here rather than in the screen that asked.
        * JavaScript checks first so the refusal can be worded properly, but that
        * check ships as Hermes bytecode in the same APK as the thing it guards.
        * This one does not, and it is the one that decides.
+       *
+       * A paid device skips the trial entirely rather than having its limits
+       * raised. The two are different states, not two points on one scale: a
+       * subscriber has no save count, no length cap and no expiry date, so
+       * asking `TrialGuard` about them and ignoring the answer would leave four
+       * ways for a stale trial fact to refuse a paying customer.
        */
-      TrialGuard.refuse(context, seconds)?.let { reason ->
-        return@AsyncFunction promise.reject("E_TRIAL_$reason", trialMessage(reason), null)
+      if (!LicenseGuard.entitled(context)) {
+        TrialGuard.refuse(context, seconds)?.let { reason ->
+          return@AsyncFunction promise.reject("E_TRIAL_$reason", trialMessage(reason), null)
+        }
       }
 
       scope.launch {
+        // Both of these are read from the catch as well, which is where a
+        // download that failed *after* writing its file is rescued -- so they
+        // have to outlive the try that would otherwise scope them.
+        val startedAt = System.currentTimeMillis()
+        val outputDir = File(context.getExternalFilesDir(null), "downloads").apply { mkdirs() }
+        // Hoisted for the same reason, one step further: the jar is the user's
+        // login on disk and the `finally` that deletes it has to be able to see
+        // it however this body leaves — including the `return@launch` in the
+        // rescue path below.
+        var jar: File? = null
+
         try {
           ensureInitialised()
           running[id] = true
           startService(id, args["title"] as? String ?: "Downloading")
 
-          val outputDir = File(context.getExternalFilesDir(null), "downloads").apply { mkdirs() }
           val request = YoutubeDLRequest(url).apply {
             addOption("--no-playlist")
             addOption("--no-warnings")
@@ -212,7 +273,7 @@ class YtDlpModule : Module() {
             // The id is ASCII, unique per attempt, and nothing reads this name:
             // the gallery copy is named from the title in MediaStoreWriter, and
             // the library shows the title off the record.
-            addOption("-o", File(outputDir, "$id.%(ext)s").absolutePath)
+            addOption("-o", File(outputDir, "$stem.%(ext)s").absolutePath)
             // Cover art in the file's own tags, so the library looks the same
             // with the network off. Best effort by design: if ffmpeg cannot
             // embed for this container, yt-dlp carries on and the artwork
@@ -233,7 +294,7 @@ class YtDlpModule : Module() {
               addOption("--merge-output-format", "mp4")
             }
             applyExtractorArgs(poToken, visitorData, clients)
-            applyBrowserSession()
+            jar = applyBrowserSession()
           }
 
           YoutubeDL.getInstance().execute(request, id) { progress, etaSeconds, line ->
@@ -248,20 +309,7 @@ class YtDlpModule : Module() {
             )
           }
 
-          // Images are excluded because --embed-thumbnail leaves its source
-          // behind on some paths, and "newest file in the directory" would then
-          // hand back a jpg as the download.
-          val media = { f: File ->
-            f.extension.lowercase() !in setOf("jpg", "jpeg", "png", "webp", "part", "ytdl")
-          }
-          // Everything this attempt writes carries the job id, so the result is
-          // found by name rather than by "newest thing in the folder". The old
-          // rule fell back to the newest media file anywhere here when this
-          // attempt produced none, which resolved a failed download as a success
-          // pointing at some earlier track -- and then spent a trial save on it.
-          val produced = outputDir.listFiles()
-            ?.filter { it.name.startsWith(id) && media(it) }
-            ?.maxByOrNull { it.lastModified() }
+          val produced = finished(outputDir, stem, startedAt)
 
           running.remove(id)
           stopServiceIfIdle()
@@ -271,7 +319,7 @@ class YtDlpModule : Module() {
           } else {
             // Spent only once a file exists. A save that failed halfway has
             // cost the tester nothing and must not cost them a slot.
-            TrialGuard.spend(context)
+            spendTrialSlot()
             promise.resolve(
               Bundle().apply {
                 putString("path", produced.absolutePath)
@@ -283,11 +331,51 @@ class YtDlpModule : Module() {
           running.remove(id)
           stopServiceIfIdle()
           val cancelled = e.message?.contains("cancel", ignoreCase = true) == true
+
+          /**
+           * A finished file is a finished download, whatever yt-dlp says next.
+           *
+           * Measured on the emulator: a 31-minute save downloaded fully,
+           * converted to a 73 MB m4a, had its source deleted -- and then failed
+           * with `Postprocessing: Conversion failed!` because embedding the
+           * *cover art* did not work. The audio was complete and correct on
+           * disk, and the user was told the download did not finish. Everything
+           * after the media itself -- the thumbnail, the metadata tags -- only
+           * decorates, and a decoration must never be able to fail the thing it
+           * decorates.
+           *
+           * `finished` is what makes this safe rather than merely forgiving. It
+           * only answers with a file this attempt wrote, that is not a `.part`,
+           * and that is not one half of a merge yt-dlp never completed -- so a
+           * dropped connection still fails (a `.part` and nothing else), and a
+           * failed video merge still fails rather than handing back a silent
+           * video. A cancel is excluded outright: the user asked for nothing,
+           * and resolving here would put a track in their library and spend a
+           * trial save on it.
+           */
+          val rescued = if (cancelled) null else finished(outputDir, stem, startedAt)
+          if (rescued != null) {
+            spendTrialSlot()
+            promise.resolve(
+              Bundle().apply {
+                putString("path", rescued.absolutePath)
+                putDouble("bytes", rescued.length().toDouble())
+                // The engine did fail; the file survived it. Said out loud so a
+                // log reader is never puzzled by a download that succeeded with
+                // an error in the line above it.
+                putString("salvagedFrom", e.message ?: "postprocessing failed")
+              },
+            )
+            return@launch
+          }
+
           promise.reject(
             if (cancelled) "E_CANCELLED" else "E_DOWNLOAD",
             e.message ?: "Download failed",
             e,
           )
+        } finally {
+          CookieJar.discard(jar)
         }
       }
     }
@@ -468,6 +556,43 @@ class YtDlpModule : Module() {
      */
     Function("trialStatus") { TrialGuard.status(context) }
 
+    /** See `backgroundRestricted` in index.ts. */
+    Function("backgroundRestricted") { isBackgroundRestricted() }
+
+    /** See `filesExist` in index.ts. */
+    Function("filesExist") { uris: List<String> -> filesExist(uris) }
+
+    /**
+     * On-device OCR of a payment screenshot. See `recognizeText` in index.ts
+     * and the private method for why it is on the device at all.
+     */
+    AsyncFunction("recognizeText") { uri: String, promise: Promise -> recognizeText(uri, promise) }
+
+    /** A picked image, re-encoded small enough to upload. See `shrinkImage` in index.ts. */
+    AsyncFunction("shrinkImage") { uri: String, maxEdge: Int, quality: Int, promise: Promise ->
+      shrinkImage(uri, maxEdge, quality, promise)
+    }
+
+    /**
+     * The subscription, for the screens that describe it and for the fetch that
+     * refreshes it. Carries the device id so JavaScript never has to derive one
+     * — there is exactly one definition of who this device is, and it is
+     * `LicenseGuard.deviceId`.
+     */
+    Function("licenceStatus") { LicenseGuard.status(context) }
+
+    /**
+     * Hand a token from the server to the only thing that may believe it.
+     *
+     * Returns whether it was kept. JavaScript performs the fetch because that is
+     * where the app's networking and logging already live, but it does not get
+     * to decide what the answer meant: a bundle patched to call this with a
+     * token it invented gets `false` and no subscription.
+     */
+    Function("rememberLicence") { token: String -> LicenseGuard.remember(context, token) }
+
+    Function("forgetLicence") { LicenseGuard.forget(context) }
+
     Function("stopBackgroundPlayback") {
       PlaybackService.stop(context)
     }
@@ -516,6 +641,38 @@ class YtDlpModule : Module() {
     Function("setPageCommand") { command: String, stamp: Double ->
       writePageCommand(command, stamp)
     }
+
+    /**
+     * Drops the YouTube session — both copies of it.
+     *
+     * There was no way to do this before, which is a security gap rather than a
+     * missing convenience: the WebView keeps a signed-in session across
+     * restarts by design (see DATA.md on what is deliberately not persisted),
+     * and the only way out of it was "Clear storage", which also deletes every
+     * automatic save the user has. A lost or handed-on phone stayed signed in.
+     *
+     * Async because the caller has to know when it is safe to remount the
+     * WebView: a remount that overlaps the cookie removal repopulates the jar
+     * from the page it is loading.
+     */
+    AsyncFunction("signOutOfYouTube") { promise: Promise -> signOutOfYouTube(promise) }
+
+    /**
+     * FLAG_SECURE, on and off, for the window the browser is drawn in.
+     *
+     * Set while the page is on a Google sign-in host and cleared everywhere
+     * else. It excludes the window from screenshots, from screen recording, and
+     * from any non-secure display it might be mirrored to, which is the whole
+     * of what the app can do about the one moment it shows a password field it
+     * does not own.
+     *
+     * Scoped to the sign-in hosts rather than left on: FLAG_SECURE applies to
+     * the whole window, so leaving it set would silently stop the user
+     * screenshotting their own library. Failing open is deliberate — an
+     * unreachable activity means no flag, never a blocked sign-in.
+     */
+    Function("setSecureWindow") { on: Boolean -> applySecureWindow(on) }
+    Function("setScreenOrientation") { orientation: String -> setScreenOrientation(orientation) }
 
     OnDestroy {
       PlaybackCommandBus.unregister(playbackCommands)
@@ -584,6 +741,10 @@ class YtDlpModule : Module() {
     YoutubeDL.getInstance().init(context)
     FFmpeg.getInstance().init(context)
     sweepStalePartials()
+    // A jar left behind by a process that died mid-download is the one copy of
+    // the login `discard` cannot reach. Swept here because engine init is the
+    // first thing any extraction or download does.
+    CookieJar.sweep(context)
     initialised = true
   }
 
@@ -675,6 +836,102 @@ class YtDlpModule : Module() {
     // bars somehow ate most of the frame, trust the original.
     if (top + (height - 1 - bottom) < height / 20 || kept < height / 2) return source
     return Bitmap.createBitmap(source, 0, top, width, kept)
+  }
+
+  /**
+   * Read the text off a payment screenshot, with ML Kit's bundled Latin model.
+   *
+   * Bundled rather than the Play-services-downloaded variant: this app is
+   * sideloaded and runs on phones whose Play services may be old, absent or
+   * unwilling to fetch a model on demand, and the moment someone has just paid
+   * is the worst possible moment to discover that. It costs a few megabytes of
+   * APK per ABI; see NATIVE.md.
+   *
+   * Blocks in the order ML Kit reports them, each block's lines joined by a
+   * newline — the server's parser reads label and value lines, and ML Kit's
+   * own `text` would give the same order with less control over separators.
+   *
+   * Decoding the file is IO and is done off the main thread; the recognizer
+   * runs on its own executor and answers on the main thread.
+   */
+  private fun recognizeText(uri: String, promise: Promise) {
+    scope.launch {
+      val image = try {
+        InputImage.fromFilePath(context, Uri.parse(uri))
+      } catch (e: Throwable) {
+        return@launch promise.reject("E_OCR_READ", e.message ?: "Could not open the image", e)
+      }
+      val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+      recognizer.process(image)
+        .addOnSuccessListener { result ->
+          val text = result.textBlocks.joinToString("\n") { block ->
+            block.lines.joinToString("\n") { it.text }
+          }
+          promise.resolve(text)
+        }
+        .addOnFailureListener { e ->
+          promise.reject("E_OCR", e.message ?: "Could not read the screenshot", e)
+        }
+        .addOnCompleteListener { runCatching { recognizer.close() } }
+    }
+  }
+
+  /**
+   * Re-encode a picked image as a JPEG whose long edge is at most `maxEdge`.
+   *
+   * expo-image-picker's `quality` only recompresses a JPEG source; a PNG —
+   * which is what most Android screenshots are — comes back as the same PNG,
+   * and a 1080x2400 one is easily over the server's upload cap. Downscaling to
+   * a long edge of ~1600 keeps every character a UPI receipt prints legible
+   * to a person reviewing it while landing in the low hundreds of kilobytes.
+   *
+   * Written to `cacheDir/upload/`, which is emptied first: there is only ever
+   * one screenshot in flight, and anything older is a receipt nobody needs a
+   * second copy of on disk.
+   */
+  private fun shrinkImage(uri: String, maxEdge: Int, quality: Int, promise: Promise) {
+    scope.launch {
+      try {
+        val source = Uri.parse(uri)
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(source).use { BitmapFactory.decodeStream(it, null, bounds) }
+        val longest = maxOf(bounds.outWidth, bounds.outHeight)
+        if (longest <= 0) return@launch promise.reject("E_IMAGE", "That file is not an image", null)
+
+        var sample = 1
+        while (longest / (sample * 2) >= maxEdge) sample *= 2
+        val decoded = context.contentResolver.openInputStream(source).use {
+          BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
+        } ?: return@launch promise.reject("E_IMAGE", "That image could not be decoded", null)
+
+        val scale = maxEdge.toFloat() / maxOf(decoded.width, decoded.height)
+        val sized = if (scale < 1f) {
+          Bitmap.createScaledBitmap(
+            decoded,
+            (decoded.width * scale).toInt().coerceAtLeast(1),
+            (decoded.height * scale).toInt().coerceAtLeast(1),
+            true,
+          ).also { if (it !== decoded) decoded.recycle() }
+        } else decoded
+
+        val dir = File(context.cacheDir, "upload").apply {
+          mkdirs()
+          listFiles()?.forEach { it.delete() }
+        }
+        val out = File(dir, "shot-${System.currentTimeMillis()}.jpg")
+        out.outputStream().use { sized.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(30, 95), it) }
+        val result = Bundle().apply {
+          putString("uri", "file://${out.absolutePath}")
+          putDouble("bytes", out.length().toDouble())
+          putInt("width", sized.width)
+          putInt("height", sized.height)
+        }
+        sized.recycle()
+        promise.resolve(result)
+      } catch (e: Throwable) {
+        promise.reject("E_IMAGE", e.message ?: "Could not prepare the image", e)
+      }
+    }
   }
 
   /** Decodes at roughly `target` px on the short edge, never larger than source. */
@@ -778,10 +1035,70 @@ class YtDlpModule : Module() {
       MediaStore.Video.Media.EXTERNAL_CONTENT_URI
     }
 
+  /**
+   * The media file this attempt finished writing, or null.
+   *
+   * Three exclusions, and each is the difference between a useful answer and a
+   * dangerous one:
+   *
+   *  - **Images**, because `--embed-thumbnail` leaves its source behind on some
+   *    paths and "newest file with this name" would otherwise hand back a jpg
+   *    as the download.
+   *  - **Everything `INTERMEDIATE` matches**, which is every name yt-dlp gives
+   *    something that is not yet a download: `.part`, `.ytdl`, the `.fNNN.`
+   *    halves of a merge, and `.temp.` -- the merge ffmpeg is still writing.
+   *    Without the first of those a video whose merge failed would resolve to
+   *    the video-only stream and be published as a silent film; without the
+   *    last it would resolve to a truncated one. Both are saved, listed, and
+   *    never explained.
+   *
+   * Preferring a file modified since `startedAt` is what keeps "this attempt
+   * produced a file" answerable now that the name is shared across attempts.
+   * Falling back to an older one is still right, and is the "already
+   * downloaded" case: yt-dlp leaves a complete file untouched, and a complete
+   * file of exactly the video and quality asked for is the correct answer
+   * whoever wrote it.
+   */
+  private fun finished(outputDir: File, stem: String, startedAt: Long): File? {
+    val usable = { f: File ->
+      f.extension.lowercase() !in setOf("jpg", "jpeg", "png", "webp") &&
+        !INTERMEDIATE.containsMatchIn(f.name)
+    }
+    val candidates = outputDir.listFiles()
+      ?.filter { it.name.startsWith("$stem.") && usable(it) }
+      .orEmpty()
+    return candidates.filter { it.lastModified() >= startedAt }.maxByOrNull { it.lastModified() }
+      ?: candidates.maxByOrNull { it.lastModified() }
+  }
+
+  /**
+   * Deletes what an interrupted download left behind and will never resume.
+   *
+   * Images are swept alongside the partials because they are only ever an
+   * intermediate: `--embed-thumbnail` downloads the cover, and when the embed
+   * fails -- or the download does -- the source is left where it fell. Measured
+   * at 179 KB from one interrupted save, which is nothing once and a folder of
+   * dead covers over a few hundred. Nothing reads them: `finished` excludes
+   * images precisely so one can never be handed back as the download.
+   *
+   * It sweeps by the same `INTERMEDIATE` pattern `finished` refuses by, rather
+   * than by extension. A merge abandoned partway leaves `.temp.mp4` and a
+   * fragmented download leaves `.part-Frag7`, and neither has an extension an
+   * extension test would recognise -- so both used to survive here forever, at
+   * the size of a whole video each.
+   *
+   * The same 24-hour cutoff guards both. A cover belonging to a download that
+   * is running right now is minutes old, so it cannot be reached from here
+   * whatever else changes about when this is called.
+   */
   private fun sweepStalePartials() {
     val cutoff = System.currentTimeMillis() - PARTIAL_MAX_AGE_MS
+    val images = setOf("jpg", "jpeg", "png", "webp")
     File(context.getExternalFilesDir(null), "downloads")
-      .listFiles { f -> f.name.endsWith(".part") && f.lastModified() < cutoff }
+      .listFiles { f ->
+        (INTERMEDIATE.containsMatchIn(f.name) || f.extension.lowercase() in images) &&
+          f.lastModified() < cutoff
+      }
       ?.forEach { runCatching { it.delete() } }
   }
 
@@ -795,12 +1112,27 @@ class YtDlpModule : Module() {
     val parts = mutableListOf<String>()
 
     if (!poToken.isNullOrBlank()) {
-      // A PO token is bound to the client that minted it. Ours comes from the
-      // page, so it is a web token and only validates against web-client
-      // requests — without pinning the client, yt-dlp asks as tv/ios and the
-      // token is ignored, which is a 403 on the media fetch.
-      parts += "player_client=web"
-      parts += "po_token=web.gvs+$poToken"
+      /**
+       * A PO token is bound to the client that minted it, so the client and the
+       * token's label have to be the same word — `po_token` is given as
+       * `CLIENT.CONTEXT+TOKEN`, and a token labelled for a client we are not
+       * asking as is simply ignored, which reads as a 403 on the media fetch.
+       *
+       * **Which client that is, is the caller's to decide, not this file's.**
+       * It used to be hardcoded to `web` here, which was wrong twice over: our
+       * page is `m.youtube.com`, so the token is an `mweb` one, and `web` is
+       * SABR-only in any case. Worse, being hardcoded in Kotlin meant the
+       * pairing could not be tried any other way without a native rebuild.
+       * TOKEN_CHAIN in src/core/ytdlp.ts now walks the candidates, so the right
+       * pairing is measured rather than asserted.
+       *
+       * `gvs` is the context: the token is for the Google Video Server media
+       * fetch, which is the request that 403s. The player request does not need
+       * one for web-family clients.
+       */
+      val client = clients?.takeIf { it.isNotBlank() } ?: "mweb"
+      parts += "player_client=$client"
+      parts += "po_token=$client.gvs+$poToken"
 
       // visitor_data on its own is worse than nothing: it pins requests to a
       // session we have no attestation for. Only send it alongside a token.
@@ -825,10 +1157,59 @@ class YtDlpModule : Module() {
   /**
    * Hands the in-app browser's YouTube session to yt-dlp. Being a real browser
    * is the whole advantage; this is where it gets spent.
+   *
+   * **The caller owns what comes back and must `CookieJar.discard` it in a
+   * `finally`.** The jar is the user's YouTube login in plaintext and it is
+   * minted per invocation, so nothing else will delete it inside the half hour
+   * the sweep waits. See the note at the top of `CookieJar` for why this is
+   * ephemeral rather than encrypted, and why per-invocation is a correctness
+   * fix as well as a security one.
    */
-  private fun YoutubeDLRequest.applyBrowserSession() {
-    val cookies = runCatching { CookieJar.write(context) }.getOrNull() ?: return
-    addOption("--cookies", cookies)
+  private fun YoutubeDLRequest.applyBrowserSession(): File? {
+    val jar = runCatching { CookieJar.write(context) }.getOrNull() ?: return null
+    addOption("--cookies", jar.absolutePath)
+    return jar
+  }
+
+  /**
+   * Cookies, DOM storage, and any jar on disk.
+   *
+   * `CookieJar.clear` wants the main thread, and the promise is resolved from
+   * there too so that the JavaScript side's next act — remounting the WebView —
+   * cannot start before the removal has actually happened.
+   */
+  private fun signOutOfYouTube(promise: Promise) {
+    main.post {
+      CookieJar.clear(context)
+      promise.resolve(null)
+    }
+  }
+
+  private fun applySecureWindow(on: Boolean) {
+    main.post {
+      val window = appContext.currentActivity?.window ?: return@post
+      runCatching {
+        if (on) {
+          window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+          window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+      }
+    }
+  }
+
+  private fun setScreenOrientation(orientation: String) {
+    main.post {
+      val activity = appContext.currentActivity ?: return@post
+      runCatching {
+        activity.requestedOrientation = when (orientation) {
+          "landscape" -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+          "portrait" -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+          "unspecified" -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+          else -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+      }
+    }
   }
 
   private fun startService(id: String, title: String) {
@@ -874,6 +1255,18 @@ class YtDlpModule : Module() {
     )
   }
 
+  private fun filesExist(uris: List<String>): List<Boolean> =
+    uris.map { uri ->
+      runCatching { File(uri.removePrefix("file://")).let { it.isFile && it.length() > 0 } }
+        .getOrDefault(false)
+    }
+
+  private fun isBackgroundRestricted(): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
+    val manager = context.getSystemService(android.app.ActivityManager::class.java) ?: return false
+    return runCatching { manager.isBackgroundRestricted }.getOrDefault(false)
+  }
+
   private fun writePageCommand(command: String, stamp: Double) {
     val value = "spool_cmd=$command.${stamp.toLong()}; Domain=.youtube.com; Path=/; Max-Age=120"
     val manager = runCatching { CookieManager.getInstance() }.getOrNull() ?: return
@@ -883,6 +1276,20 @@ class YtDlpModule : Module() {
       "https://music.youtube.com/",
     ).forEach { url -> runCatching { manager.setCookie(url, value) } }
     runCatching { manager.flush() }
+  }
+
+  /**
+   * Charge a save against the trial quota, unless this device has paid.
+   *
+   * A subscriber's saves must not draw down the trial counter. The counter
+   * outlives an uninstall by design, so a year of paid downloads would silently
+   * exhaust it, and the day a subscription lapsed the user would find a trial
+   * that had already been spent by their own paid usage — a refusal that is
+   * impossible to explain and impossible for them to clear.
+   */
+  private fun spendTrialSlot() {
+    if (LicenseGuard.entitled(context)) return
+    TrialGuard.spend(context)
   }
 
   /**

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import YtDlp, { type TrialStatus } from '../../modules/ytdlp';
+import { licence, useLicence } from './license';
 
 /**
  * What a pre-release build allows, as the screens see it.
@@ -25,7 +26,7 @@ export const CONTACT_EMAIL = 'connect@afinitycode.com';
  * charged is the kind of thing this app's design rules already refuse
  * everywhere else.
  */
-export const TRIAL_PRICE = '₹399';
+export const TRIAL_PRICE = '₹249';
 export const LAUNCH_PRICE = '₹999';
 
 const OFFLINE: TrialStatus = {
@@ -73,13 +74,20 @@ export const savesLeft = (status: TrialStatus = cached): number =>
  * refusing here on a missing field would block videos that are perfectly short.
  */
 export function refuseSave(seconds: number, status: TrialStatus = cached): string | null {
+  // A subscriber is not a tester whose limits have been raised — they are in a
+  // different state, with no expiry, no quota and no length cap. Asking about
+  // the trial at all would leave four ways for a stale trial fact to refuse
+  // someone who has paid, so the question is not asked. `LicenseGuard` makes
+  // exactly the same call natively, and that is the one that decides.
+  if (licence().entitled) return null;
+
   if (!status.trial) return null;
   if (!status.intact) return 'This build has been modified and will not download.';
   if (status.expired || daysLeft(status) === 0) {
-    return `This pre-release has expired. Email ${CONTACT_EMAIL} for a full copy.`;
+    return 'This pre-release has expired. Subscribe to keep saving.';
   }
   if (savesLeft(status) <= 0) {
-    return `Pre-release builds can save ${status.maxDownloads} items, and this one has saved them all.`;
+    return `Pre-release builds can save ${status.maxDownloads} items, and this one has saved them all. Subscribe to keep saving.`;
   }
   if (seconds > 0 && seconds > status.maxSeconds) {
     const cap = Math.round(status.maxSeconds / 60);
@@ -120,4 +128,30 @@ export function useTrial(): TrialStatus {
     };
   }, []);
   return status;
+}
+
+/**
+ * Whether the entire app is locked.
+ *
+ * An active subscriber (`licence().entitled`) has full access to the entire app.
+ * A user whose trial is active (`status.trial && !status.expired && daysLeft(status) > 0 && savesLeft(status) > 0 && status.intact`)
+ * has trial access to browse and test the app in the foreground.
+ *
+ * Once the trial expires or if quota is spent and no active plan is held,
+ * the entire app is locked until subscribed.
+ */
+export function isAppLocked(status: TrialStatus = cached): boolean {
+  if (licence().entitled) return false;
+  if (!status.trial) return true;
+  if (!status.intact) return true;
+  if (status.expired || daysLeft(status) <= 0) return true;
+  if (savesLeft(status) <= 0) return true;
+  return false;
+}
+
+/** Re-renders when either trial status or subscription entitlement changes. */
+export function useIsAppLocked(): boolean {
+  const trialStatus = useTrial();
+  useLicence();
+  return isAppLocked(trialStatus);
 }

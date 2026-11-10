@@ -18,16 +18,36 @@ const listeners = new Map();
 const defaults = {
   initialize: async () => '2026.01.01',
   version: async () => '2026.01.01',
-  listFormats: async () => JSON.stringify({ id: 'x', title: 'x', formats: [] }),
+  // Healthy by default: one adaptive video rung and one audio-only rung, which
+  // is the shape of every real YouTube manifest. An empty list is not the
+  // benign answer it looks like — the client walk reads a manifest with no
+  // audio-only stream as a degraded response and keeps walking, so defaulting
+  // to `formats: []` would make every unconfigured test walk the whole chain.
+  listFormats: async () =>
+    JSON.stringify({
+      id: 'x',
+      title: 'x',
+      formats: [
+        { format_id: '137', ext: 'mp4', vcodec: 'avc1.640028', acodec: 'none', height: 1080 },
+        { format_id: '140', ext: 'm4a', vcodec: 'none', acodec: 'mp4a.40.2', abr: 128 },
+      ],
+    }),
   download: async () => ({ path: '/data/x.m4a', bytes: 1 }),
   cancel: async () => {},
   updateEngine: async () => ({ status: 'updated', version: '2026.02.02' }),
   publishToGallery: async () => 'content://media/1',
   scanSaved: async () => [],
   readArtwork: async () => ({ uri: 'file:///art.jpg', dominant: '#101010' }),
+  // Every cached cover still on disk — the state of a cache nobody cleared.
+  filesExist: (uris) => uris.map(() => true),
   setNowPlaying: () => {},
   stopBackgroundPlayback: () => {},
   setPageCommand: () => {},
+  setWebViewVisible: () => {},
+  writeTextFile: async () => 'content://downloads/1',
+  signOutOfYouTube: async () => {},
+  setSecureWindow: () => {},
+  setScreenOrientation: () => {},
   trialStatus: () => ({
     trial: false,
     expiresAt: 0,
@@ -37,6 +57,25 @@ const defaults = {
     maxDownloads: 0,
     maxSeconds: 0,
   }),
+  // Unconfigured by default — no server and no device — which is what a debug
+  // build actually reports. A suite that wants a subscription says so, and one
+  // that does not is never accidentally tested against a live-looking licence.
+  licenceStatus: () => ({
+    entitled: false,
+    expiresAt: 0,
+    plan: '',
+    device: '',
+    server: '',
+  }),
+  // The real one verifies a signature. This one cannot, so it accepts nothing
+  // by default: a test that wants a token kept has to say so, which keeps the
+  // asymmetry visible rather than letting `rememberLicence` look free.
+  rememberLicence: () => false,
+  forgetLicence: () => {},
+  // A screenshot with nothing legible on it, and a shrink that hands back a
+  // small file. Payment suites that care about either say so.
+  recognizeText: async () => '',
+  shrinkImage: async () => ({ uri: 'file:///cache/upload/shot.jpg', bytes: 1, width: 1, height: 1 }),
 };
 
 const native = {

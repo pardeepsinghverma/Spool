@@ -1,8 +1,14 @@
+import React, { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { useTheme } from '../ui/ThemeContext';
 import { TrialChip } from '../ui/TrialChip';
 import { fixed, space, type } from '../ui/theme';
+import { PRICES, daysLeft, openPaywall, useLicence } from '../core/license';
+import { openAccount, useAccount, type AccountIntent } from '../core/account';
+import { formatDate } from '../core/payments';
+import { SubscribeSheet } from '../sheets/SubscribeSheet';
+import { AccountSheet } from '../sheets/AccountSheet';
 
 /**
  * Profile. See docs/UI.md §02 and §04.
@@ -87,6 +93,23 @@ type Props = {
   onExport?: () => void;
   /** "3 playlists · 41 tracks", so the row says what it would write. */
   exportSummary?: string;
+  /**
+   * Writes the flight recorder out to Downloads/Spool as a text file.
+   *
+   * Present unconditionally, unlike the backup row above it: there is always a
+   * log, and the moment someone needs this is the moment something has gone
+   * wrong — which is the worst possible time for the row to have hidden itself.
+   */
+  onDiagnostics?: () => void;
+  /**
+   * Drops this device's YouTube session. Always offered, even when nobody has
+   * signed in: the app cannot read whether a session exists without going to
+   * the native side for it, and a row that appears only once you are signed in
+   * is a row you cannot find when you want it.
+   */
+  onSignOut?: () => void;
+  /** "412 entries · 1 crash", so the row says what it would write. */
+  diagnosticsSummary?: string;
 };
 
 const KEEP: { key: KeepAs; label: string; icon: keyof typeof MaterialIcons.glyphMap }[] = [
@@ -115,9 +138,17 @@ export function ProfileScreen({
   onVideoQuality,
   onExport,
   exportSummary,
+  onDiagnostics,
+  onSignOut,
+  diagnosticsSummary,
 }: Props) {
   const { t } = useTheme();
+  const lic = useLicence();
+  const { email } = useAccount();
+  const licenceDays = daysLeft(lic);
   const set = (patch: Partial<AutoSave>) => onAutoSave({ ...autoSave, ...patch });
+  const [paywallOpen, setPaywallOpen] = useState(false);
+  const [accountIntent, setAccountIntent] = useState<AccountIntent | null>(null);
 
   return (
     <View style={[styles.root, { backgroundColor: t.deep }]}>
@@ -127,15 +158,64 @@ export function ProfileScreen({
             <Text style={[styles.avatarText, { color: t.accent }]}>A</Text>
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.identityTitle, { color: t.on }]}>This device</Text>
+            <Text style={[styles.identityTitle, { color: t.on }]} numberOfLines={1}>
+              {email ?? 'This device'}
+            </Text>
+            {/* The claim is about what leaves *this phone*, and it is stated at
+                the scope where it is exact. Signed out, nothing does unless a
+                subscription is bought. Signed in, the server knows the email,
+                a hash of ANDROID_ID, a device name the user would recognise
+                in their device list, and — to enforce one-device-at-a-time
+                playback — *when* this phone starts and stops playing. Never
+                what: no titles, no library, no search. Saying "nothing
+                leaves" while a play lock reports start and stop would be the
+                half-truth this file's copy rules exist to refuse.
+
+                A payment also sends a screenshot of a UPI receipt, which
+                names the payer; that is said on the paywall where it happens. */}
             <Text style={[styles.identitySub, { color: t.onDim }]}>
-              No account · nothing leaves the phone
+              {email ? 'Spool account · signed in' : 'No account · nothing leaves the phone'}
             </Text>
           </View>
           <TrialChip />
         </View>
 
-        <Text style={[styles.section, { color: t.onDim }]}>Keep automatically</Text>
+        <Text style={[styles.section, { color: t.onDim }]}>Subscription</Text>
+
+        {/* Deliberately a row rather than a banner. A subscriber has nothing to
+            do here and should not be sold to twice; someone who has not paid has
+            the paywall one tap away from where they already are. */}
+        {/* The account row comes first because the subscription belongs to
+            it: signed out, "Subscribe" leads here anyway. */}
+        <SettingRow
+          label={email ? 'Account' : 'Sign in'}
+          value={email ?? 'Use it on every phone'}
+          onPress={() => setAccountIntent({})}
+        />
+        <SettingRow
+          label={
+            lic.entitled
+              ? (lic.plan === 'annual' ? 'Yearly plan' : (lic.plan === 'daily' ? '1-Day plan' : 'Monthly plan'))
+              : 'Subscribe'
+          }
+          value={
+            lic.entitled
+              ? licenceDays === null
+                ? 'Active'
+                : `${licenceDays} ${licenceDays === 1 ? 'day' : 'days'} left`
+              : lic.paidThrough && lic.paidThrough > Date.now()
+                ? // Paid, but the short lease has run out while offline: the
+                  // date is still true, and the next sync restores the rest.
+                  `Paid to ${formatDate(lic.paidThrough)}`
+                : `${PRICES.annual?.amount || '₹249'} a year`
+          }
+          valueColour={lic.entitled ? fixed.saved : undefined}
+          onPress={() => setPaywallOpen(true)}
+        />
+
+        <Text style={[styles.section, styles.sectionAfterRow, { color: t.onDim }]}>
+          Keep automatically
+        </Text>
 
         <View style={[styles.card, { borderColor: fixed.line }]}>
           <View style={styles.switchRow}>
@@ -347,11 +427,47 @@ export function ProfileScreen({
           onPress={onEngine}
         />
 
+        {/* Signing in is the browser's business and the session is the
+            browser's to keep — but signing out had nowhere to live, so it lives
+            here, next to the other things that act on stored state. The value
+            says what it costs rather than what it is, because "Sign out" alone
+            reads as if it might take the library with it. */}
+        {onSignOut && (
+          <SettingRow
+            label="Sign out of YouTube"
+            value="Library stays"
+            onPress={onSignOut}
+          />
+        )}
+
+        {/* The app keeps a running record of what it did and why — see
+            src/core/log.ts. This is the only way it leaves the device, and it
+            leaves as a file the user can read first rather than as a report
+            sent anywhere. There is a licence server now, and it is not a
+            destination for this: nothing in this file or src/core/export.ts
+            can reach it. */}
+        {onDiagnostics && (
+          <SettingRow
+            label="Export diagnostics"
+            value={diagnosticsSummary ?? ''}
+            onPress={onDiagnostics}
+          />
+        )}
+
         <Text style={[styles.legal, { color: fixed.mute }]}>
           Built for your own uploads, Creative Commons and public-domain
           material, and personal offline use where your local law allows it.
         </Text>
       </ScrollView>
+      {paywallOpen ? (
+        <SubscribeSheet onClose={() => setPaywallOpen(false)} />
+      ) : null}
+      {accountIntent ? (
+        <AccountSheet
+          intent={accountIntent}
+          onClose={() => setAccountIntent(null)}
+        />
+      ) : null}
     </View>
   );
 }
@@ -396,6 +512,8 @@ const styles = StyleSheet.create({
   identityTitle: { ...type.rowTitle, fontSize: 16, marginBottom: 2 },
   identitySub: { ...type.body, fontSize: 12 },
   section: { ...type.section, marginBottom: 14 },
+  /** A section title that follows a SettingRow needs the room the card gives. */
+  sectionAfterRow: { marginTop: space.section },
   card: { borderWidth: 1, borderRadius: 12, padding: space.gutter, marginBottom: space.section },
   switchRow: { flexDirection: 'row', alignItems: 'center', gap: space.row, marginBottom: 6 },
   switchLabel: { ...type.rowTitle, flex: 1, fontSize: 14.5 },

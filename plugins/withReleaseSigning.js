@@ -1,4 +1,4 @@
-const { withAppBuildGradle } = require('expo/config-plugins');
+const { withAppBuildGradle, withGradleProperties } = require('expo/config-plugins');
 
 /**
  * Teaches the generated Android project to sign release builds with a real key.
@@ -36,6 +36,18 @@ const SIGNING_CONFIG = `
 `;
 
 module.exports = function withReleaseSigning(config) {
+  config = withGradleProperties(config, (cfg) => {
+    const key = 'SPOOL_SIGNING_SHA256';
+    const value = '6A836D549AF7FEC349484FB625D11E77C678D6C2433736B16E0346BEB722F278';
+    const existing = cfg.modResults.find((item) => item.type === 'property' && item.key === key);
+    if (existing) {
+      existing.value = value;
+    } else {
+      cfg.modResults.push({ type: 'property', key, value });
+    }
+    return cfg;
+  });
+
   return withAppBuildGradle(config, (cfg) => {
     if (cfg.modResults.language !== 'groovy') {
       throw new Error('withReleaseSigning expects a Groovy build.gradle');

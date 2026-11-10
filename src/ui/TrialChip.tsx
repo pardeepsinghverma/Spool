@@ -2,6 +2,7 @@ import { Pressable, StyleSheet, Text } from 'react-native';
 import { useTheme } from './ThemeContext';
 import { radius, space, type } from './theme';
 import { daysLeft, openPreRelease, useTrial } from '../core/trial';
+import { useLicence } from '../core/license';
 
 /**
  * The one permanent mark a pre-release build leaves on the interface.
@@ -20,6 +21,15 @@ import { daysLeft, openPreRelease, useTrial } from '../core/trial';
 export function TrialChip() {
   const { t } = useTheme();
   const status = useTrial();
+  const licence = useLicence();
+
+  // A subscriber is not a tester, and the trial's clock is not counting down
+  // for them — `refuseSave` and `LicenseGuard` both stop asking about it the
+  // moment a licence verifies. Leaving the chip up would be the interface
+  // contradicting the thing it is a readout of: measured on the emulator, a
+  // device that had just paid for a year still read "TRIAL · 7D".
+  if (licence.entitled) return null;
+
   if (!status.trial) return null;
 
   const days = daysLeft(status);

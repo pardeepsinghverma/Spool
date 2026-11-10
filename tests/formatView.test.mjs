@@ -75,9 +75,31 @@ describe('bestAudio', () => {
     assert.equal(bestAudio(formats, 96).id, 'unknown');
   });
 
-  test('ignores video and answers nothing when there is no audio', () => {
+  test('ignores adaptive video and answers nothing when there is no audio at all', () => {
     assert.equal(bestAudio([video('137', 1080)], Infinity), undefined);
     assert.equal(bestAudio([], Infinity), undefined);
+  });
+
+  test('a muxed stream is audio too, when the manifest offers nothing else', () => {
+    // A degraded manifest comes back holding one muxed 360p and no audio-only
+    // rung, and `kind` calls anything carrying video a video. Read literally
+    // that says the page has no audio — so the replay rule returned without a
+    // word and the FAB claimed there was no downloadable media, on a music
+    // video. The audio is right there inside the muxed rung and `-x` extracts
+    // it; falling back to it beats saving nothing.
+    const muxed = video('18', 360, { muxed: true, size: 16_000_000 });
+    assert.equal(bestAudio([muxed], Infinity).id, '18');
+  });
+
+  test('the smallest muxed rung wins, since the video track is about to be dropped', () => {
+    const small = video('18', 360, { muxed: true, size: 16_000_000 });
+    const large = video('22', 720, { muxed: true, size: 60_000_000 });
+    assert.equal(bestAudio([large, small], Infinity).id, '18');
+  });
+
+  test('a real audio rung still beats a muxed one', () => {
+    const muxed = video('18', 360, { muxed: true, size: 1 });
+    assert.equal(bestAudio([muxed, audio('140', 128)], Infinity).id, '140');
   });
 });
 

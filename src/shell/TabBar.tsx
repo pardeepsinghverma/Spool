@@ -1,4 +1,5 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
 import { useTheme } from '../ui/ThemeContext';
 import { fixed, size, type } from '../ui/theme';
@@ -29,9 +30,20 @@ export function TabBar({
   onChange: (tab: Tab) => void;
 }) {
   const { t } = useTheme();
+  const insets = useSafeAreaInsets();
 
   return (
-    <View style={[styles.root, { backgroundColor: t.deep, borderTopColor: fixed.line }]}>
+    <View
+      style={[
+        styles.root,
+        {
+          backgroundColor: t.deep,
+          borderTopColor: fixed.line,
+          paddingBottom: insets.bottom,
+          height: size.tabBar + insets.bottom,
+        },
+      ]}
+    >
       {TABS.map(({ key, label, icon }) => {
         const active = key === value;
         return (

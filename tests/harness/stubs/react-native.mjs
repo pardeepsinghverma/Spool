@@ -31,3 +31,7 @@ export function reset() {
 
 export const Platform = { OS: 'android', select: (map) => map.android ?? map.default };
 export const NativeModules = {};
+export const Clipboard = {
+  getString: async () => '',
+  setString: () => {},
+};
