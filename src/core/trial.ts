@@ -137,7 +137,9 @@ export function useTrial(): TrialStatus {
  * The app is locked until the subscription is completed.
  */
 export function isAppLocked(_status: TrialStatus = cached): boolean {
-  if (licence().entitled) return false;
+  const lic = licence();
+  if (lic.entitled) return false;
+  if (lic.paidThrough && lic.paidThrough > Date.now()) return false;
   return true;
 }
 

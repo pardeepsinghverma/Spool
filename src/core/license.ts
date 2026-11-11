@@ -113,8 +113,10 @@ let nextSyncAt = 0;
 const listeners = new Set<() => void>();
 
 const rebuild = () => {
+  const isPaid = Boolean(cached.entitled || (facts.paidThrough && facts.paidThrough > Date.now()));
   view = {
     ...cached,
+    entitled: isPaid,
     // The token's plan is authoritative while there is one; the persisted one
     // covers the offline stretch after the lease has run out.
     plan: cached.plan || facts.plan,
@@ -135,6 +137,9 @@ export function refreshLicence(): LicenceStatus {
   rebuild();
   return cached;
 }
+
+// Read native status immediately on module import
+refreshLicence();
 
 export const licence = (): LicenceView => view;
 

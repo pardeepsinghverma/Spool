@@ -222,33 +222,41 @@ export function BrowserScreen() {
     setPreReleaseOpener(() => setPreRelease(true));
   }, []);
 
-  // Sync licences and account on mount
+  // Unified boot sequence: load everything (licence facts, account, onboarding, mode)
+  // BEFORE setting booted to true, so subscribed users never see a flash of the lock screen.
   useEffect(() => {
+    let active = true;
     void (async () => {
       try {
-        await loadLicenceFacts();
-        await loadAccount();
-        syncLicence();
+        refreshLicence();
         refreshTrial();
+        const [seen, lastMode] = await Promise.all([
+          hasSeenFirstRun(),
+          loadLastMode(),
+          loadLicenceFacts(),
+          loadAccount(),
+        ]);
+        if (!active) return;
+        refreshLicence();
+        refreshTrial();
+        if (lastMode === 'ytmusic') {
+          setMode('ytmusic');
+        } else {
+          setMode('youtube');
+        }
+        setScreen(seen ? 'browse' : 'firstrun');
+        void syncLicence();
       } catch (e) {
-        log.warn('boot', 'licence sync failed', log.describe(e));
+        log.warn('boot', 'boot sequence failed', log.describe(e));
+      } finally {
+        if (active) setBooted(true);
       }
     })();
-    return watchLicence();
-  }, []);
-
-  // Boot check for onboarding and last mode
-  useEffect(() => {
-    void (async () => {
-      const [seen, lastMode] = await Promise.all([hasSeenFirstRun(), loadLastMode()]);
-      if (lastMode === 'ytmusic') {
-        setMode('ytmusic');
-      } else {
-        setMode('youtube');
-      }
-      setScreen(seen ? 'browse' : 'firstrun');
-      setBooted(true);
-    })();
+    const unwatch = watchLicence();
+    return () => {
+      active = false;
+      unwatch();
+    };
   }, []);
 
   // FLAG_SECURE on Google sign-in pages
