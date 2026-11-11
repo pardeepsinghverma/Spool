@@ -292,6 +292,11 @@ type YtDlpNative = {
    */
   setScreenOrientation(orientation: 'landscape' | 'portrait' | 'unspecified'): void;
   /**
+   * Prompts the native Android Google account chooser dialog. Resolves with
+   * the picked account email, or null if dismissed/unavailable.
+   */
+  pickGoogleAccount(): Promise<string | null>;
+  /**
    * Whether the user has battery-restricted Spool (Android's "Restricted"
    * battery setting, or Samsung's sleeping apps). While it is, Android strips
    * the playback service of foreground status the moment the screen goes off
@@ -362,5 +367,14 @@ export function setScreenOrientation(
       YtDlp.setScreenOrientation(orientation);
     }
   } catch {}
+}
+
+export async function pickGoogleAccount(): Promise<string | null> {
+  try {
+    if (typeof YtDlp?.pickGoogleAccount === 'function') {
+      return await YtDlp.pickGoogleAccount();
+    }
+  } catch {}
+  return null;
 }
 

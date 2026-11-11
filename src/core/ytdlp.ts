@@ -613,6 +613,22 @@ export const setScreenOrientation = (orientation: 'landscape' | 'portrait' | 'un
 };
 
 /**
+ * Prompts the native Android Google account chooser dialog, allowing the user
+ * to select one of their device Google accounts. Resolves to the selected email
+ * (e.g. "user@gmail.com") or null if dismissed.
+ */
+export const pickGoogleAccount = async (): Promise<string | null> => {
+  try {
+    if (typeof YtDlp?.pickGoogleAccount === 'function') {
+      return await YtDlp.pickGoogleAccount();
+    }
+  } catch (err) {
+    log.warn('account', 'Failed to pick Google account', { error: String(err) });
+  }
+  return null;
+};
+
+/**
  * A video-only stream has to be paired with audio or the file is silent —
  * yt-dlp merges the pair itself using the bundled ffmpeg.
  *

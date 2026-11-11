@@ -23,6 +23,7 @@ import {
   saveLastMode,
 } from '../core/storage';
 import {
+  pickGoogleAccount,
   setScreenOrientation,
   setSecureWindow,
   signOutOfYouTube,
@@ -111,6 +112,8 @@ export function BrowserScreen() {
     setNotice(text);
     noticeTimer.current = setTimeout(() => setNotice(null), ms);
   }, []);
+
+  const promptingAccountRef = useRef(false);
 
   // Bottom bar auto-slide animation on scroll
   const barAnim = useRef(new Animated.Value(0)).current;
@@ -418,6 +421,28 @@ export function BrowserScreen() {
     );
   }, [flashNotice]);
 
+  const signInWithGoogle = useCallback(async () => {
+    try {
+      const account = await pickGoogleAccount();
+      const targetUrl = mode === 'youtube' ? HOME_URL : MUSIC_HOME_URL;
+      const baseSignInUrl = `https://accounts.google.com/ServiceLogin?service=youtube&continue=${encodeURIComponent(targetUrl)}`;
+      const finalUrl = account
+        ? `${baseSignInUrl}&login_hint=${encodeURIComponent(account)}&Email=${encodeURIComponent(account)}`
+        : baseSignInUrl;
+      setScreen('browse');
+      if (mode === 'youtube') {
+        setUrlYt(finalUrl);
+      } else {
+        setUrlMusic(finalUrl);
+      }
+      if (account) {
+        flashNotice(`Signing in as ${account}...`);
+      }
+    } catch (e) {
+      log.warn('account', 'Google sign-in launch failed', log.describe(e));
+    }
+  }, [mode, flashNotice]);
+
   const exportDiagnostics = useCallback(() => {
     void (async () => {
       try {
@@ -535,6 +560,26 @@ export function BrowserScreen() {
                 if (!/^https?:/i.test(request.url)) return false;
                 if (isSignInPage(request.url)) {
                   setSecureWindow(true);
+                  if (
+                    !promptingAccountRef.current &&
+                    !request.url.includes('login_hint=') &&
+                    !request.url.includes('Email=') &&
+                    /(?:ServiceLogin|AccountChooser|identifier)/i.test(request.url)
+                  ) {
+                    promptingAccountRef.current = true;
+                    void (async () => {
+                      try {
+                        const account = await pickGoogleAccount();
+                        if (account) {
+                          const sep = request.url.includes('?') ? '&' : '?';
+                          const hinted = `${request.url}${sep}login_hint=${encodeURIComponent(account)}&Email=${encodeURIComponent(account)}`;
+                          setUrlYt(hinted);
+                        }
+                      } finally {
+                        promptingAccountRef.current = false;
+                      }
+                    })();
+                  }
                 }
                 return true;
               }}
@@ -544,11 +589,11 @@ export function BrowserScreen() {
               domStorageEnabled
               javaScriptEnabled
               thirdPartyCookiesEnabled
+              sharedCookiesEnabled
               allowFileAccess={false}
               allowFileAccessFromFileURLs={false}
               allowUniversalAccessFromFileURLs={false}
               mixedContentMode="never"
-              saveFormDataDisabled
               geolocationEnabled={false}
               setSupportMultipleWindows={false}
               style={{ flex: 1, backgroundColor: t.pageBg }}
@@ -581,6 +626,26 @@ export function BrowserScreen() {
                 if (!/^https?:/i.test(request.url)) return false;
                 if (isSignInPage(request.url)) {
                   setSecureWindow(true);
+                  if (
+                    !promptingAccountRef.current &&
+                    !request.url.includes('login_hint=') &&
+                    !request.url.includes('Email=') &&
+                    /(?:ServiceLogin|AccountChooser|identifier)/i.test(request.url)
+                  ) {
+                    promptingAccountRef.current = true;
+                    void (async () => {
+                      try {
+                        const account = await pickGoogleAccount();
+                        if (account) {
+                          const sep = request.url.includes('?') ? '&' : '?';
+                          const hinted = `${request.url}${sep}login_hint=${encodeURIComponent(account)}&Email=${encodeURIComponent(account)}`;
+                          setUrlMusic(hinted);
+                        }
+                      } finally {
+                        promptingAccountRef.current = false;
+                      }
+                    })();
+                  }
                 }
                 return true;
               }}
@@ -590,11 +655,11 @@ export function BrowserScreen() {
               domStorageEnabled
               javaScriptEnabled
               thirdPartyCookiesEnabled
+              sharedCookiesEnabled
               allowFileAccess={false}
               allowFileAccessFromFileURLs={false}
               allowUniversalAccessFromFileURLs={false}
               mixedContentMode="never"
-              saveFormDataDisabled
               geolocationEnabled={false}
               setSupportMultipleWindows={false}
               style={{ flex: 1, backgroundColor: t.pageBg }}
@@ -620,6 +685,7 @@ export function BrowserScreen() {
           <View style={[StyleSheet.absoluteFill, { backgroundColor: t.deep, zIndex: 5 }]}>
             <ProfileScreen
               onSignOut={signOut}
+              onSignInGoogle={signInWithGoogle}
               onDiagnostics={exportDiagnostics}
               diagnosticsSummary={diagnosticsSummary}
             />

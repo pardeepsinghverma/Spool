@@ -849,4 +849,11 @@ describe('session controls', () => {
       { method: 'setScreenOrientation', args: ['unspecified'] },
     ]);
   });
+
+  test('pickGoogleAccount forwards to native bridge', async () => {
+    native.handlers.pickGoogleAccount = async () => 'user@gmail.com';
+    const { pickGoogleAccount } = await load();
+    const result = await pickGoogleAccount();
+    assert.equal(result, 'user@gmail.com');
+  });
 });

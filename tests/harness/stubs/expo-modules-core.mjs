@@ -48,6 +48,7 @@ const defaults = {
   signOutOfYouTube: async () => {},
   setSecureWindow: () => {},
   setScreenOrientation: () => {},
+  pickGoogleAccount: async () => null,
   trialStatus: () => ({
     trial: false,
     expiresAt: 0,

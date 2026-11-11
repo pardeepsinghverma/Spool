@@ -1,5 +1,7 @@
 package com.afinitycode.spool.ytdlp
 
+import android.accounts.Account
+import android.accounts.AccountManager
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
@@ -109,6 +111,9 @@ class YtDlpModule : Module() {
 
   @Volatile
   private var initialised = false
+
+  private var pendingAccountPromise: Promise? = null
+  private val REQ_CHOOSE_ACCOUNT = 8923
 
   private val context: Context
     get() = requireNotNull(appContext.reactContext) { "React context unavailable" }
@@ -673,6 +678,11 @@ class YtDlpModule : Module() {
      */
     Function("setSecureWindow") { on: Boolean -> applySecureWindow(on) }
     Function("setScreenOrientation") { orientation: String -> setScreenOrientation(orientation) }
+    AsyncFunction("pickGoogleAccount") { promise: Promise -> promptChooseAccount(promise) }
+
+    OnActivityResult { _, payload ->
+      handleActivityResult(payload.requestCode, payload.resultCode, payload.data)
+    }
 
     OnDestroy {
       PlaybackCommandBus.unregister(playbackCommands)
@@ -1208,6 +1218,45 @@ class YtDlpModule : Module() {
           "unspecified" -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
           else -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
+      }
+    }
+  }
+
+  private fun promptChooseAccount(promise: Promise) {
+    main.post {
+      val activity = appContext.currentActivity
+      if (activity == null) {
+        promise.resolve(null)
+        return@post
+      }
+      pendingAccountPromise = promise
+      try {
+        val intent = AccountManager.newChooseAccountIntent(
+          null,
+          null as List<Account>?,
+          arrayOf("com.google"),
+          null,
+          null,
+          null,
+          null
+        )
+        activity.startActivityForResult(intent, REQ_CHOOSE_ACCOUNT)
+      } catch (e: Throwable) {
+        pendingAccountPromise = null
+        promise.resolve(null)
+      }
+    }
+  }
+
+  private fun handleActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+    if (requestCode == REQ_CHOOSE_ACCOUNT) {
+      val promise = pendingAccountPromise ?: return
+      pendingAccountPromise = null
+      if (resultCode == android.app.Activity.RESULT_OK && data != null) {
+        val accountName = data.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
+        promise.resolve(accountName)
+      } else {
+        promise.resolve(null)
       }
     }
   }

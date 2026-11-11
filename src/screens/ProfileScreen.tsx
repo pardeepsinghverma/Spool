@@ -84,12 +84,14 @@ type Props = {
   exportSummary?: string;
   onDiagnostics?: () => void;
   onSignOut?: () => void;
+  onSignInGoogle?: () => void;
   diagnosticsSummary?: string;
 };
 
 export function ProfileScreen({
   onDiagnostics,
   onSignOut,
+  onSignInGoogle,
   diagnosticsSummary,
 }: Props) {
   const { t } = useTheme();
@@ -146,6 +148,14 @@ export function ProfileScreen({
         <Text style={[styles.section, styles.sectionAfterRow, { color: t.onDim }]}>
           Session & Settings
         </Text>
+
+        {onSignInGoogle && (
+          <SettingRow
+            label="Google Account"
+            value="Pick from device"
+            onPress={onSignInGoogle}
+          />
+        )}
 
         {onSignOut && (
           <SettingRow
