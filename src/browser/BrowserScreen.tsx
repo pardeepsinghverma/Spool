@@ -544,10 +544,7 @@ export function BrowserScreen() {
         <View style={StyleSheet.absoluteFill}>
           {/* YouTube WebView */}
           <View
-            style={[
-              StyleSheet.absoluteFill,
-              mode === 'youtube' ? styles.paneVisible : styles.paneHidden,
-            ]}
+            style={mode === 'youtube' ? styles.paneVisible : styles.paneHidden}
             pointerEvents={mode === 'youtube' && screen === 'browse' ? 'auto' : 'none'}
           >
             <WebView
@@ -610,10 +607,7 @@ export function BrowserScreen() {
 
           {/* YouTube Music WebView */}
           <View
-            style={[
-              StyleSheet.absoluteFill,
-              mode === 'ytmusic' ? styles.paneVisible : styles.paneHidden,
-            ]}
+            style={mode === 'ytmusic' ? styles.paneVisible : styles.paneHidden}
             pointerEvents={mode === 'ytmusic' && screen === 'browse' ? 'auto' : 'none'}
           >
             <WebView
@@ -834,10 +828,20 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   page: { flex: 1, overflow: 'hidden' },
   paneVisible: {
-    zIndex: 1,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 2,
     opacity: 1,
   },
   paneHidden: {
+    position: 'absolute',
+    top: 0,
+    left: -10000,
+    width: '100%',
+    height: '100%',
     zIndex: 0,
     opacity: 0,
   },

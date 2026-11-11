@@ -53,11 +53,6 @@ const COSMETIC_SELECTORS = [
   'ytmusic-player[is-ad]',
   '[is-ad]',
   'ytmusic-pivot-bar-item-renderer[tab-id="SPunlimited"]',
-  '.ytmusic-popup-container:has(ytmusic-mealbar-promo-renderer)',
-  '.ytmusic-popup-container:has(ytmusic-upsell-dialog-renderer)',
-  'tp-yt-paper-dialog:has(ytmusic-upsell-dialog-renderer)',
-  'tp-yt-paper-dialog:has(ytmusic-mealbar-promo-renderer)',
-  'tp-yt-paper-dialog:has(ytmusic-general-offer-dialog-renderer)',
 ].join(',');
 
 export const ADBLOCK_SCRIPT = `
@@ -152,16 +147,25 @@ export const ADBLOCK_SCRIPT = `
 
       // Dismiss any mealbars or dialog promos automatically
       var promoDismiss = document.querySelector(
-        'ytmusic-mealbar-promo-renderer #dismiss-button, ytmusic-upsell-dialog-renderer #dismiss-button, tp-yt-paper-dialog #dismiss-button, ytmusic-mealbar-promo-renderer button[aria-label*="Dismiss" i]'
+        'ytmusic-mealbar-promo-renderer #dismiss-button, ytmusic-upsell-dialog-renderer #dismiss-button, tp-yt-paper-dialog #dismiss-button, ytmusic-mealbar-promo-renderer button[aria-label*="Dismiss" i], button[aria-label*="No thanks" i]'
       );
       if (promoDismiss) promoDismiss.click();
 
-      // Clear any stuck backdrop if promo was present
-      var backdrop = document.querySelector('tp-yt-iron-overlay-backdrop.opened, iron-overlay-backdrop.opened');
-      var promoDialog = document.querySelector('ytmusic-upsell-dialog-renderer, ytmusic-mealbar-promo-renderer, ytmusic-general-offer-dialog-renderer');
-      if (backdrop && promoDialog) {
-        backdrop.remove();
-        promoDialog.remove();
+      // Clear promo dialogs and any stuck backdrops
+      var promos = document.querySelectorAll(
+        'ytmusic-mealbar-promo-renderer, ytmusic-upsell-dialog-renderer, ytmusic-general-offer-dialog-renderer, ytmusic-unlimited-offer-dialog-renderer'
+      );
+      if (promos.length > 0) {
+        for (var p = 0; p < promos.length; p++) {
+          var pr = promos[p];
+          var parentDialog = pr.closest ? pr.closest('tp-yt-paper-dialog, ytmusic-popup-container, .ytmusic-popup-container') : null;
+          if (parentDialog) parentDialog.remove();
+          pr.remove();
+        }
+        var backdrops = document.querySelectorAll('tp-yt-iron-overlay-backdrop, iron-overlay-backdrop');
+        for (var b = 0; b < backdrops.length; b++) {
+          backdrops[b].remove();
+        }
       }
 
       var player = document.querySelector('.ad-showing') || document.querySelector('.ad-interrupting, ytmusic-player[is-ad], [is-ad]');
