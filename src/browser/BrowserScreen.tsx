@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Animated,
   BackHandler,
+  Easing,
   Platform,
   Pressable,
   StyleSheet,
@@ -9,7 +11,7 @@ import {
   View,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView, type WebViewNavigation } from 'react-native-webview';
 import type { WebViewMessageEvent } from 'react-native-webview';
 import * as log from '../core/log';
@@ -46,7 +48,7 @@ import { AccountSheet } from '../sheets/AccountSheet';
 import { PlayLockSheet } from '../sheets/PlayLockSheet';
 import { SubscribeSheet } from '../sheets/SubscribeSheet';
 import { useTheme } from '../ui/ThemeContext';
-import { fixed, tintFromDominant } from '../ui/theme';
+import { fixed, size, tintFromDominant } from '../ui/theme';
 import { ADBLOCK_SCRIPT } from './adblock';
 import { BACKGROUND_SCRIPT, type MediaMessage } from './background';
 import { useBackgroundPlayback } from './useBackgroundPlayback';
@@ -56,33 +58,45 @@ import {
   MUSIC_HOME_URL,
   NAV_SCRIPT,
   USER_AGENT,
-  isMusicUrl,
   isSignInPage,
+  type BarScrollMessage,
   type FullscreenMessage,
   type NavMessage,
 } from './youtube';
 
-type Screen = 'firstrun' | Tab;
+type Screen = 'firstrun' | 'browse' | 'account';
 
 /**
- * All three hooks must beat the page's own scripts, so they share one
- * injection. Background playback is the strictest of them: it only works if its
- * visibility listeners are registered ahead of YouTube's.
+ * Injected scripts for ad blocking, poToken minting, and background audio.
  */
 const PRELOAD = ADBLOCK_SCRIPT + POTOKEN_SCRIPT + BACKGROUND_SCRIPT;
 
 export function BrowserScreen() {
   const { t, setTint } = useTheme();
-  const webview = useRef<WebView>(null);
+  const insets = useSafeAreaInsets();
 
+  // Dual WebViews: YouTube and YouTube Music stay loaded in parallel for zero-reload switching
+  const ytWebview = useRef<WebView>(null);
+  const musicWebview = useRef<WebView>(null);
+  const activeWebviewRef = useRef<WebView | null>(null);
+
+  const [mode, setMode] = useState<'youtube' | 'ytmusic'>('youtube');
   const [screen, setScreen] = useState<Screen>('browse');
   const [booted, setBooted] = useState(false);
-  const [url, setUrl] = useState(HOME_URL);
-  const [title, setTitle] = useState('');
-  const [canGoBack, setCanGoBack] = useState(false);
-  const [loadProgress, setLoadProgress] = useState<number | null>(null);
+
+  const [urlYt, setUrlYt] = useState(HOME_URL);
+  const [urlMusic, setUrlMusic] = useState(MUSIC_HOME_URL);
+  const [canGoBackYt, setCanGoBackYt] = useState(false);
+  const [canGoBackMusic, setCanGoBackMusic] = useState(false);
+  const [loadProgressYt, setLoadProgressYt] = useState<number | null>(null);
+  const [loadProgressMusic, setLoadProgressMusic] = useState<number | null>(null);
+
+  const [webviewKeyYt, setWebviewKeyYt] = useState(0);
+  const [webviewKeyMusic, setWebviewKeyMusic] = useState(0);
+
   const [isFullscreen, setIsFullscreen] = useState(false);
 
+  // Sheets & locks
   const [preRelease, setPreRelease] = useState(false);
   const [paywallOpen, setPaywallOpen] = useState(false);
   const [accountIntent, setAccountIntent] = useState<AccountIntent | null>(null);
@@ -98,30 +112,107 @@ export function BrowserScreen() {
     noticeTimer.current = setTimeout(() => setNotice(null), ms);
   }, []);
 
-  const [entry, setEntry] = useState(HOME_URL);
-  const entryRef = useRef(HOME_URL);
-  const [webviewKey, setWebviewKey] = useState(0);
+  // Bottom bar auto-slide animation on scroll
+  const barAnim = useRef(new Animated.Value(0)).current;
+  const barHiddenRef = useRef(false);
+  const [barHidden, setBarHiddenState] = useState(false);
+  const barHeight = size.tabBar + insets.bottom;
 
-  const isMusic = useMemo(() => isMusicUrl(url), [url]);
+  const setBarHidden = useCallback(
+    (hidden: boolean) => {
+      if (screen !== 'browse' || appLocked) {
+        if (barHiddenRef.current) {
+          barHiddenRef.current = false;
+          setBarHiddenState(false);
+          Animated.timing(barAnim, {
+            toValue: 0,
+            duration: 200,
+            useNativeDriver: true,
+          }).start();
+        }
+        return;
+      }
+      if (barHiddenRef.current === hidden) return;
+      barHiddenRef.current = hidden;
+      setBarHiddenState(hidden);
+      Animated.timing(barAnim, {
+        toValue: hidden ? barHeight + 10 : 0,
+        duration: hidden ? 250 : 200,
+        easing: hidden
+          ? Easing.bezier(0.4, 0, 1, 1)
+          : Easing.bezier(0, 0, 0.2, 1),
+        useNativeDriver: true,
+      }).start();
+    },
+    [barAnim, barHeight, screen, appLocked]
+  );
 
+  // Keep active webview ref pointing to currently selected or playing webview
+  useEffect(() => {
+    activeWebviewRef.current = mode === 'youtube' ? ytWebview.current : musicWebview.current;
+  }, [mode]);
+
+  // Background audio & media service
   const {
-    onMedia: onMediaMessage,
+    onMedia: onMediaPlaybackMessage,
     toggle: toggleBrowserMedia,
     stopPage: stopBrowserMedia,
-  } = useBackgroundPlayback(webview, {
+  } = useBackgroundPlayback(activeWebviewRef, {
     canSave: () => false,
     onSave: () => {},
     revision: '0',
   });
 
-  // Stop playback when locked
+  const onYtMedia = useCallback(
+    (mediaMsg: MediaMessage) => {
+      if (mediaMsg.playing) {
+        // When YouTube plays, pause YT Music
+        musicWebview.current?.injectJavaScript(`
+          try {
+            var v = document.querySelector('video');
+            if (v && !v.paused) v.pause();
+          } catch (e) {}
+          true;
+        `);
+        activeWebviewRef.current = ytWebview.current;
+      }
+      onMediaPlaybackMessage(mediaMsg);
+    },
+    [onMediaPlaybackMessage]
+  );
+
+  const onMusicMedia = useCallback(
+    (mediaMsg: MediaMessage) => {
+      if (mediaMsg.playing) {
+        // When YT Music plays, pause YouTube
+        ytWebview.current?.injectJavaScript(`
+          try {
+            var v = document.querySelector('video');
+            if (v && !v.paused) v.pause();
+          } catch (e) {}
+          true;
+        `);
+        activeWebviewRef.current = musicWebview.current;
+      }
+      onMediaPlaybackMessage(mediaMsg);
+    },
+    [onMediaPlaybackMessage]
+  );
+
+  const stopBoth = useCallback(() => {
+    ytWebview.current?.injectJavaScript(`try { var v = document.querySelector('video'); if (v) v.pause(); } catch(e){}`);
+    musicWebview.current?.injectJavaScript(`try { var v = document.querySelector('video'); if (v) v.pause(); } catch(e){}`);
+    stopBrowserMedia();
+  }, [stopBrowserMedia]);
+
+  // Stop playback when app is locked
   useEffect(() => {
     if (appLocked) {
-      stopBrowserMedia();
+      stopBoth();
     }
-  }, [appLocked, stopBrowserMedia]);
+  }, [appLocked, stopBoth]);
 
-  // Global sheet openers
+  // Sheet openers
   useEffect(() => {
     setPaywallOpener(() => setPaywallOpen(true));
     setAccountOpener((intent) => setAccountIntent(intent));
@@ -143,28 +234,25 @@ export function BrowserScreen() {
     return watchLicence();
   }, []);
 
-  // Boot check for first-run onboarding and last selected mode
+  // Boot check for onboarding and last mode
   useEffect(() => {
     void (async () => {
-      const [seen, mode] = await Promise.all([hasSeenFirstRun(), loadLastMode()]);
-      if (mode === 'ytmusic') {
-        setEntry(MUSIC_HOME_URL);
-        setUrl(MUSIC_HOME_URL);
+      const [seen, lastMode] = await Promise.all([hasSeenFirstRun(), loadLastMode()]);
+      if (lastMode === 'ytmusic') {
+        setMode('ytmusic');
+      } else {
+        setMode('youtube');
       }
       setScreen(seen ? 'browse' : 'firstrun');
       setBooted(true);
     })();
   }, []);
 
-  // Keep entryRef current
+  // FLAG_SECURE on Google sign-in pages
   useEffect(() => {
-    if (/^https?:/i.test(url)) entryRef.current = url;
-  }, [url]);
-
-  // Raise FLAG_SECURE on Google sign-in pages so passwords/2FA cannot be screen-recorded or leaked in recents
-  useEffect(() => {
-    setSecureWindow(isSignInPage(url));
-  }, [url]);
+    const currentUrl = mode === 'youtube' ? urlYt : urlMusic;
+    setSecureWindow(isSignInPage(currentUrl));
+  }, [mode, urlYt, urlMusic]);
 
   useEffect(() => {
     return () => {
@@ -172,7 +260,7 @@ export function BrowserScreen() {
     };
   }, []);
 
-  // Back button handling
+  // Hardware back button
   useEffect(() => {
     const handler = () => {
       if (isFullscreen) {
@@ -180,12 +268,18 @@ export function BrowserScreen() {
         setIsFullscreen(false);
         return true;
       }
-      if (screen === 'browse' && canGoBack) {
-        webview.current?.goBack();
-        return true;
+      if (screen === 'browse') {
+        const currentWv = mode === 'youtube' ? ytWebview.current : musicWebview.current;
+        const canBack = mode === 'youtube' ? canGoBackYt : canGoBackMusic;
+        if (canBack) {
+          currentWv?.goBack();
+          setBarHidden(false);
+          return true;
+        }
       }
       if (screen !== 'browse') {
         setScreen('browse');
+        setBarHidden(false);
         return true;
       }
       return false;
@@ -193,11 +287,16 @@ export function BrowserScreen() {
 
     const sub = BackHandler.addEventListener('hardwareBackPress', handler);
     return () => sub.remove();
-  }, [screen, canGoBack, isFullscreen]);
+  }, [screen, mode, canGoBackYt, canGoBackMusic, isFullscreen, setBarHidden]);
 
-  // Handle messages from the injected script
-  const onMessage = useCallback(
-    (event: WebViewMessageEvent) => {
+  // Shared message parser
+  const handleMessage = useCallback(
+    (
+      event: WebViewMessageEvent,
+      isYt: boolean,
+      setUrl: (u: string) => void,
+      onMedia: (m: MediaMessage) => void
+    ) => {
       const raw = event.nativeEvent.data;
       if (!raw || raw[0] !== '{') return;
 
@@ -224,9 +323,8 @@ export function BrowserScreen() {
         const nav = msg as NavMessage;
         if (nav.url) {
           setUrl(nav.url);
-          setTitle(nav.title || '');
         }
-        if (nav.theme) {
+        if (nav.theme && ((isYt && mode === 'youtube') || (!isYt && mode === 'ytmusic'))) {
           setTint(tintFromDominant(nav.theme === 'dark' ? '#111111' : '#f5f5f5'));
         }
         return;
@@ -240,24 +338,53 @@ export function BrowserScreen() {
       }
 
       if (msg.type === 'media') {
-        onMediaMessage(msg as MediaMessage);
+        onMedia(msg as MediaMessage);
+        return;
+      }
+
+      if (msg.type === 'barScroll') {
+        const s = msg as BarScrollMessage;
+        setBarHidden(s.hidden);
+        return;
       }
     },
-    [onMediaMessage, setTint]
+    [mode, setTint, setBarHidden]
   );
 
-  const onNavigationStateChange = useCallback((nav: WebViewNavigation) => {
-    setCanGoBack(nav.canGoBack);
+  const onYtMessage = useCallback(
+    (e: WebViewMessageEvent) => handleMessage(e, true, setUrlYt, onYtMedia),
+    [handleMessage, onYtMedia]
+  );
+
+  const onMusicMessage = useCallback(
+    (e: WebViewMessageEvent) => handleMessage(e, false, setUrlMusic, onMusicMedia),
+    [handleMessage, onMusicMedia]
+  );
+
+  const onNavStateChangeYt = useCallback((nav: WebViewNavigation) => {
+    setCanGoBackYt(nav.canGoBack);
     if (nav.url) {
-      setUrl(nav.url);
-      setSecureWindow(isSignInPage(nav.url));
+      setUrlYt(nav.url);
+      if (mode === 'youtube') setSecureWindow(isSignInPage(nav.url));
     }
+  }, [mode]);
+
+  const onNavStateChangeMusic = useCallback((nav: WebViewNavigation) => {
+    setCanGoBackMusic(nav.canGoBack);
+    if (nav.url) {
+      setUrlMusic(nav.url);
+      if (mode === 'ytmusic') setSecureWindow(isSignInPage(nav.url));
+    }
+  }, [mode]);
+
+  const onRenderProcessGoneYt = useCallback(() => {
+    log.error('webview', 'youtube renderer crashed', { restoring: HOME_URL });
+    setWebviewKeyYt((k) => k + 1);
   }, []);
 
-  const onRenderProcessGone = useCallback(() => {
-    log.error('webview', 'renderer crashed', { restoring: entryRef.current });
-    setEntry(entryRef.current);
-    setWebviewKey((k) => k + 1);
+  const onRenderProcessGoneMusic = useCallback(() => {
+    log.error('webview', 'ytmusic renderer crashed', { restoring: MUSIC_HOME_URL });
+    setWebviewKeyMusic((k) => k + 1);
   }, []);
 
   const signOut = useCallback(() => {
@@ -274,9 +401,10 @@ export function BrowserScreen() {
           onPress: () => {
             void signOutOfYouTube()
               .then(() => {
-                setEntry(HOME_URL);
-                setUrl(HOME_URL);
-                setWebviewKey((k) => k + 1);
+                setUrlYt(HOME_URL);
+                setUrlMusic(MUSIC_HOME_URL);
+                setWebviewKeyYt((k) => k + 1);
+                setWebviewKeyMusic((k) => k + 1);
                 setScreen('browse');
                 flashNotice('Signed out on this device');
               })
@@ -318,6 +446,24 @@ export function BrowserScreen() {
     return `${all.length} entries · ${bad} errors`;
   }, []);
 
+  const handleTabChange = useCallback(
+    (tab: Tab) => {
+      setBarHidden(false);
+      if (tab === 'youtube') {
+        setScreen('browse');
+        setMode('youtube');
+        void saveLastMode('youtube');
+      } else if (tab === 'ytmusic') {
+        setScreen('browse');
+        setMode('ytmusic');
+        void saveLastMode('ytmusic');
+      } else if (tab === 'account' || tab === 'profile') {
+        setScreen('account');
+      }
+    },
+    [setBarHidden]
+  );
+
   if (!booted) return null;
 
   if (screen === 'firstrun') {
@@ -338,171 +484,123 @@ export function BrowserScreen() {
     );
   }
 
+  const activeLoadProgress = mode === 'youtube' ? loadProgressYt : loadProgressMusic;
+
   return (
     <SafeAreaView
       style={[styles.root, { backgroundColor: t.deep }]}
-      edges={isFullscreen ? [] : ['top', 'bottom']}
+      edges={isFullscreen ? [] : ['top']}
     >
       <View style={styles.page}>
-        {/* Browser header with YouTube / YouTube Music switcher and controls */}
-        {screen === 'browse' && !isFullscreen && (
-          <View
-            style={[
-              styles.browserHeader,
-              { backgroundColor: t.chrome, borderBottomColor: fixed.line },
-            ]}
-          >
-            {canGoBack ? (
-              <Pressable
-                onPress={() => webview.current?.goBack()}
-                accessibilityRole="button"
-                accessibilityLabel="Go back"
-                style={({ pressed }) => [styles.navIconButton, pressed && { opacity: 0.6 }]}
-              >
-                <MaterialIcons name="arrow-back" size={20} color={t.on} />
-              </Pressable>
-            ) : (
-              <View style={styles.navIconPlaceholder} />
-            )}
-
-            <View style={[styles.modeSwitcher, { backgroundColor: t.surface }]}>
-              <Pressable
-                onPress={() => {
-                  if (isMusic) {
-                    setUrl(HOME_URL);
-                    setEntry(HOME_URL);
-                    void saveLastMode('youtube');
-                    webview.current?.injectJavaScript(`
-                      try { window.onbeforeunload = null; } catch (e) {}
-                      window.location.href = '${HOME_URL}';
-                      true;
-                    `);
-                  }
-                }}
-                accessibilityRole="tab"
-                accessibilityState={{ selected: !isMusic }}
-                accessibilityLabel="YouTube mode"
-                style={[
-                  styles.modeTab,
-                  !isMusic && [styles.modeTabActive, { backgroundColor: t.accent }],
-                ]}
-              >
-                <MaterialIcons
-                  name="smart-display"
-                  size={15}
-                  color={!isMusic ? t.onAccent : t.onDim}
-                />
-                <Text
-                  style={[
-                    styles.modeTabText,
-                    { color: !isMusic ? t.onAccent : t.onDim },
-                    !isMusic && styles.modeTabTextActive,
-                  ]}
-                >
-                  YouTube
-                </Text>
-              </Pressable>
-
-              <Pressable
-                onPress={() => {
-                  if (!isMusic) {
-                    setUrl(MUSIC_HOME_URL);
-                    setEntry(MUSIC_HOME_URL);
-                    void saveLastMode('ytmusic');
-                    webview.current?.injectJavaScript(`
-                      try { window.onbeforeunload = null; } catch (e) {}
-                      window.location.href = '${MUSIC_HOME_URL}';
-                      true;
-                    `);
-                  }
-                }}
-                accessibilityRole="tab"
-                accessibilityState={{ selected: isMusic }}
-                accessibilityLabel="YouTube Music mode"
-                style={[
-                  styles.modeTab,
-                  isMusic && [styles.modeTabActive, { backgroundColor: t.accent }],
-                ]}
-              >
-                <MaterialIcons
-                  name="music-note"
-                  size={15}
-                  color={isMusic ? t.onAccent : t.onDim}
-                />
-                <Text
-                  style={[
-                    styles.modeTabText,
-                    { color: isMusic ? t.onAccent : t.onDim },
-                    isMusic && styles.modeTabTextActive,
-                  ]}
-                >
-                  YT Music
-                </Text>
-              </Pressable>
-            </View>
-
-            <Pressable
-              onPress={() => webview.current?.reload()}
-              accessibilityRole="button"
-              accessibilityLabel="Reload page"
-              style={({ pressed }) => [styles.navIconButton, pressed && { opacity: 0.6 }]}
-            >
-              <MaterialIcons name="refresh" size={20} color={t.onDim} />
-            </Pressable>
-          </View>
-        )}
-
-        {screen === 'browse' && !isFullscreen && loadProgress !== null && (
-          <View style={[styles.loadProgressTrack, { backgroundColor: t.surface }]}>
+        {/* Top thin loading bar when initial page loads */}
+        {screen === 'browse' && !isFullscreen && activeLoadProgress !== null && (
+          <View style={styles.loadProgressTrack}>
             <View
               style={[
                 styles.loadProgressBar,
                 {
                   backgroundColor: t.accent,
-                  width: `${Math.round(loadProgress * 100)}%`,
+                  width: `${Math.round(activeLoadProgress * 100)}%`,
                 },
               ]}
             />
           </View>
         )}
 
-        {/* Never unmounted: switching to Account tab must not cost a page reload */}
-        <WebView
-          key={webviewKey}
-          ref={webview}
-          source={{ uri: entry }}
-          userAgent={USER_AGENT}
-          injectedJavaScriptBeforeContentLoaded={PRELOAD}
-          injectedJavaScript={NAV_SCRIPT}
-          onMessage={onMessage}
-          onRenderProcessGone={onRenderProcessGone}
-          onNavigationStateChange={onNavigationStateChange}
-          onLoadProgress={({ nativeEvent }) =>
-            setLoadProgress(nativeEvent.progress < 1 ? nativeEvent.progress : null)
-          }
-          onLoadEnd={() => setLoadProgress(null)}
-          onShouldStartLoadWithRequest={(request) => {
-            if (!/^https?:/i.test(request.url)) return false;
-            if (isSignInPage(request.url)) {
-              setSecureWindow(true);
-            }
-            return true;
-          }}
-          allowsBackForwardNavigationGestures
-          mediaPlaybackRequiresUserAction={false}
-          allowsFullscreenVideo
-          domStorageEnabled
-          javaScriptEnabled
-          thirdPartyCookiesEnabled
-          allowFileAccess={false}
-          allowFileAccessFromFileURLs={false}
-          allowUniversalAccessFromFileURLs={false}
-          mixedContentMode="never"
-          saveFormDataDisabled
-          geolocationEnabled={false}
-          setSupportMultipleWindows={false}
-          style={{ flex: 1, backgroundColor: t.pageBg }}
-        />
+        {/* Dual WebViews: Both stay mounted for instant 0-second switching without reloads */}
+        <View style={StyleSheet.absoluteFill}>
+          {/* YouTube WebView */}
+          <View
+            style={[
+              StyleSheet.absoluteFill,
+              mode === 'youtube' ? styles.paneVisible : styles.paneHidden,
+            ]}
+            pointerEvents={mode === 'youtube' && screen === 'browse' ? 'auto' : 'none'}
+          >
+            <WebView
+              key={webviewKeyYt}
+              ref={ytWebview}
+              source={{ uri: HOME_URL }}
+              userAgent={USER_AGENT}
+              injectedJavaScriptBeforeContentLoaded={PRELOAD}
+              injectedJavaScript={NAV_SCRIPT}
+              onMessage={onYtMessage}
+              onRenderProcessGone={onRenderProcessGoneYt}
+              onNavigationStateChange={onNavStateChangeYt}
+              onLoadProgress={({ nativeEvent }) =>
+                setLoadProgressYt(nativeEvent.progress < 1 ? nativeEvent.progress : null)
+              }
+              onLoadEnd={() => setLoadProgressYt(null)}
+              onShouldStartLoadWithRequest={(request) => {
+                if (!/^https?:/i.test(request.url)) return false;
+                if (isSignInPage(request.url)) {
+                  setSecureWindow(true);
+                }
+                return true;
+              }}
+              allowsBackForwardNavigationGestures
+              mediaPlaybackRequiresUserAction={false}
+              allowsFullscreenVideo
+              domStorageEnabled
+              javaScriptEnabled
+              thirdPartyCookiesEnabled
+              allowFileAccess={false}
+              allowFileAccessFromFileURLs={false}
+              allowUniversalAccessFromFileURLs={false}
+              mixedContentMode="never"
+              saveFormDataDisabled
+              geolocationEnabled={false}
+              setSupportMultipleWindows={false}
+              style={{ flex: 1, backgroundColor: t.pageBg }}
+            />
+          </View>
+
+          {/* YouTube Music WebView */}
+          <View
+            style={[
+              StyleSheet.absoluteFill,
+              mode === 'ytmusic' ? styles.paneVisible : styles.paneHidden,
+            ]}
+            pointerEvents={mode === 'ytmusic' && screen === 'browse' ? 'auto' : 'none'}
+          >
+            <WebView
+              key={webviewKeyMusic}
+              ref={musicWebview}
+              source={{ uri: MUSIC_HOME_URL }}
+              userAgent={USER_AGENT}
+              injectedJavaScriptBeforeContentLoaded={PRELOAD}
+              injectedJavaScript={NAV_SCRIPT}
+              onMessage={onMusicMessage}
+              onRenderProcessGone={onRenderProcessGoneMusic}
+              onNavigationStateChange={onNavStateChangeMusic}
+              onLoadProgress={({ nativeEvent }) =>
+                setLoadProgressMusic(nativeEvent.progress < 1 ? nativeEvent.progress : null)
+              }
+              onLoadEnd={() => setLoadProgressMusic(null)}
+              onShouldStartLoadWithRequest={(request) => {
+                if (!/^https?:/i.test(request.url)) return false;
+                if (isSignInPage(request.url)) {
+                  setSecureWindow(true);
+                }
+                return true;
+              }}
+              allowsBackForwardNavigationGestures
+              mediaPlaybackRequiresUserAction={false}
+              allowsFullscreenVideo
+              domStorageEnabled
+              javaScriptEnabled
+              thirdPartyCookiesEnabled
+              allowFileAccess={false}
+              allowFileAccessFromFileURLs={false}
+              allowUniversalAccessFromFileURLs={false}
+              mixedContentMode="never"
+              saveFormDataDisabled
+              geolocationEnabled={false}
+              setSupportMultipleWindows={false}
+              style={{ flex: 1, backgroundColor: t.pageBg }}
+            />
+          </View>
+        </View>
 
         {screen === 'browse' && notice && (
           <View
@@ -518,8 +616,8 @@ export function BrowserScreen() {
         )}
 
         {/* Screen 2: Account & Subscriptions */}
-        {(screen === 'account' || screen === 'profile') && (
-          <View style={[StyleSheet.absoluteFill, { backgroundColor: t.deep }]}>
+        {screen === 'account' && (
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: t.deep, zIndex: 5 }]}>
             <ProfileScreen
               onSignOut={signOut}
               onDiagnostics={exportDiagnostics}
@@ -529,20 +627,45 @@ export function BrowserScreen() {
         )}
       </View>
 
-      {/* Mini player shown above the TabBar when on Account tab and web media is active */}
-      {screen !== 'browse' && !appLocked && (
-        <NowPlayingBar
-          onOpen={() => setScreen('browse')}
-          page={{
-            onOpen: () => setScreen('browse'),
-            onToggle: toggleBrowserMedia,
-            onStop: stopBrowserMedia,
-          }}
+      {/* Slide-down Bottom Bar with NowPlayingBar & Mode Switcher */}
+      {!isFullscreen && !appLocked && (
+        <Animated.View
+          style={[
+            styles.bottomBarContainer,
+            {
+              transform: [{ translateY: barAnim }],
+            },
+          ]}
+        >
+          {screen !== 'browse' && (
+            <NowPlayingBar
+              onOpen={() => setScreen('browse')}
+              page={{
+                onOpen: () => setScreen('browse'),
+                onToggle: toggleBrowserMedia,
+                onStop: stopBoth,
+              }}
+            />
+          )}
+
+          <TabBar
+            value={screen === 'account' ? 'account' : mode}
+            onChange={handleTabChange}
+          />
+        </Animated.View>
+      )}
+
+      {/* Tap receiver when bottom bar is hidden to quickly reveal it */}
+      {barHidden && !isFullscreen && !appLocked && screen === 'browse' && (
+        <Pressable
+          style={styles.showBarTouchZone}
+          onPress={() => setBarHidden(false)}
+          accessibilityRole="button"
+          accessibilityLabel="Reveal navigation bar"
         />
       )}
 
-      {!isFullscreen && !appLocked && <TabBar value={screen} onChange={setScreen} />}
-
+      {/* Locked overlay until subscription is active */}
       {appLocked && (
         <View
           style={[
@@ -636,56 +759,36 @@ export function BrowserScreen() {
 const styles = StyleSheet.create({
   root: { flex: 1 },
   page: { flex: 1, overflow: 'hidden' },
-  browserHeader: {
-    height: 44,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+  paneVisible: {
+    zIndex: 1,
+    opacity: 1,
   },
-  modeSwitcher: {
-    flexDirection: 'row',
-    borderRadius: 20,
-    padding: 3,
+  paneHidden: {
+    zIndex: 0,
+    opacity: 0,
   },
-  modeTab: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 16,
+  bottomBarContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 15,
   },
-  modeTabActive: {
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.15,
-    shadowRadius: 1,
-    elevation: 1,
-  },
-  modeTabText: {
-    fontSize: 12,
-    fontWeight: '500',
-    letterSpacing: 0.2,
-  },
-  modeTabTextActive: {
-    fontWeight: '700',
-  },
-  navIconButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  navIconPlaceholder: {
-    width: 34,
-    height: 34,
+  showBarTouchZone: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 18,
+    zIndex: 14,
   },
   loadProgressTrack: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
     height: 2,
-    width: '100%',
+    zIndex: 20,
     overflow: 'hidden',
   },
   loadProgressBar: {
@@ -693,7 +796,7 @@ const styles = StyleSheet.create({
   },
   notice: {
     position: 'absolute',
-    bottom: 12,
+    bottom: 64,
     left: 16,
     right: 16,
     flexDirection: 'row',
@@ -703,6 +806,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 10,
     borderWidth: 1,
+    zIndex: 25,
   },
   noticeText: {
     flex: 1,

@@ -9,10 +9,11 @@ import { fixed, size, type } from '../ui/theme';
  * Switching is instant by design.
  */
 
-export type Tab = 'browse' | 'account' | 'profile';
+export type Tab = 'youtube' | 'ytmusic' | 'account' | 'browse' | 'profile';
 
-const TABS: { key: 'browse' | 'account'; label: string; icon: keyof typeof MaterialIcons.glyphMap }[] = [
-  { key: 'browse', label: 'Browse', icon: 'explore' },
+const TABS: { key: 'youtube' | 'ytmusic' | 'account'; label: string; icon: keyof typeof MaterialIcons.glyphMap }[] = [
+  { key: 'youtube', label: 'YouTube', icon: 'smart-display' },
+  { key: 'ytmusic', label: 'YT Music', icon: 'library-music' },
   { key: 'account', label: 'Account', icon: 'person' },
 ];
 
@@ -39,7 +40,10 @@ export function TabBar({
       ]}
     >
       {TABS.map(({ key, label, icon }) => {
-        const active = key === value || (key === 'account' && value === 'profile');
+        const active =
+          key === value ||
+          (key === 'youtube' && value === 'browse') ||
+          (key === 'account' && value === 'profile');
         return (
           <Pressable
             key={key}

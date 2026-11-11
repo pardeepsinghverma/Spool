@@ -87,6 +87,11 @@ export type FullscreenMessage = {
   orientation: 'landscape' | 'portrait';
 };
 
+export type BarScrollMessage = {
+  type: 'barScroll';
+  hidden: boolean;
+};
+
 /**
  * Injected into the page to report navigation back to the app.
  *
@@ -238,9 +243,45 @@ export const NAV_SCRIPT = `
     };
   });
 
-  window.addEventListener('popstate', function () { report('popstate'); });
-  window.addEventListener('yt-navigate-finish', function () { report('yt-navigate'); });
-  window.addEventListener('ytmusic-navigate-finish', function () { report('ytmusic-navigate'); });
+  // Scroll detection for auto-hiding the bottom navigation bar
+  var lastScrollY = 0;
+  var scrollTicking = false;
+  function handleScroll(e) {
+    if (!scrollTicking) {
+      window.requestAnimationFrame(function () {
+        var target = (e && e.target && e.target.scrollTop !== undefined) ? e.target : (document.scrollingElement || document.body);
+        var currentY = window.scrollY || (target && target.scrollTop) || (document.documentElement && document.documentElement.scrollTop) || 0;
+        var diff = currentY - lastScrollY;
+        if (Math.abs(diff) > 15) {
+          var shouldHide = diff > 0 && currentY > 50;
+          try {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'barScroll',
+              hidden: shouldHide
+            }));
+          } catch (err) {}
+          lastScrollY = currentY;
+        }
+        scrollTicking = false;
+      });
+      scrollTicking = true;
+    }
+  }
+
+  window.addEventListener('scroll', handleScroll, { passive: true, capture: true });
+
+  function showBottomBar() {
+    try {
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'barScroll',
+        hidden: false
+      }));
+    } catch (e) {}
+  }
+
+  window.addEventListener('popstate', function () { report('popstate'); showBottomBar(); });
+  window.addEventListener('yt-navigate-finish', function () { report('yt-navigate'); showBottomBar(); });
+  window.addEventListener('ytmusic-navigate-finish', function () { report('ytmusic-navigate'); showBottomBar(); });
   document.addEventListener('fullscreenchange', reportFullscreen);
   document.addEventListener('webkitfullscreenchange', reportFullscreen);
 
