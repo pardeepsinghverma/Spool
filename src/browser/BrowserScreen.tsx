@@ -115,11 +115,22 @@ export function BrowserScreen() {
 
   const promptingAccountRef = useRef(false);
 
+  // Track which webview is actively playing audio to arbitrate now-playing and prevent dual-playback loops
+  const playingSourceRef = useRef<'youtube' | 'ytmusic' | null>(null);
+  const [playingSource, setPlayingSource] = useState<'youtube' | 'ytmusic' | null>(null);
+
   // Bottom bar auto-slide animation on scroll
+  const shouldShowNowPlaying =
+    screen === 'account' ||
+    (screen === 'browse' && (
+      (mode === 'youtube' && playingSource === 'ytmusic') ||
+      (mode === 'ytmusic' && playingSource === 'youtube')
+    ));
+
   const barAnim = useRef(new Animated.Value(0)).current;
   const barHiddenRef = useRef(false);
   const [barHidden, setBarHiddenState] = useState(false);
-  const barHeight = size.tabBar + insets.bottom;
+  const barHeight = (shouldShowNowPlaying ? 52 : 0) + size.tabBar + insets.bottom;
 
   const setBarHidden = useCallback(
     (hidden: boolean) => {
@@ -150,10 +161,16 @@ export function BrowserScreen() {
     [barAnim, barHeight, screen, appLocked]
   );
 
-  // Keep active webview ref pointing to currently selected or playing webview
+  // Keep active webview ref pointing to currently playing webview, or current mode if idle
   useEffect(() => {
-    activeWebviewRef.current = mode === 'youtube' ? ytWebview.current : musicWebview.current;
-  }, [mode]);
+    if (playingSourceRef.current === 'ytmusic') {
+      activeWebviewRef.current = musicWebview.current;
+    } else if (playingSourceRef.current === 'youtube') {
+      activeWebviewRef.current = ytWebview.current;
+    } else {
+      activeWebviewRef.current = mode === 'youtube' ? ytWebview.current : musicWebview.current;
+    }
+  }, [mode, playingSource]);
 
   // Background audio & media service
   const {
@@ -166,47 +183,103 @@ export function BrowserScreen() {
     revision: '0',
   });
 
+  const pauseMusic = useCallback(() => {
+    musicWebview.current?.injectJavaScript(`
+      try {
+        if (window.__spoolMedia && window.__spoolMedia.pause) {
+          window.__spoolMedia.pause();
+        } else {
+          var v = document.querySelector('video');
+          if (v) v.pause();
+        }
+      } catch (e) {}
+      true;
+    `);
+  }, []);
+
+  const pauseYt = useCallback(() => {
+    ytWebview.current?.injectJavaScript(`
+      try {
+        if (window.__spoolMedia && window.__spoolMedia.pause) {
+          window.__spoolMedia.pause();
+        } else {
+          var v = document.querySelector('video');
+          if (v) v.pause();
+        }
+      } catch (e) {}
+      true;
+    `);
+  }, []);
+
   const onYtMedia = useCallback(
     (mediaMsg: MediaMessage) => {
       if (mediaMsg.playing) {
-        // When YouTube plays, pause YT Music
-        musicWebview.current?.injectJavaScript(`
-          try {
-            var v = document.querySelector('video');
-            if (v && !v.paused) v.pause();
-          } catch (e) {}
-          true;
-        `);
+        playingSourceRef.current = 'youtube';
+        setPlayingSource('youtube');
         activeWebviewRef.current = ytWebview.current;
+        pauseMusic();
+        onMediaPlaybackMessage(mediaMsg);
+      } else {
+        // If YouTube is idle or paused, but YT Music is the one playing in background,
+        // YouTube's idle message must NOT overwrite YT Music's playback state or drop the service!
+        if (playingSourceRef.current === 'ytmusic') {
+          return;
+        }
+        if (playingSourceRef.current === 'youtube' && !mediaMsg.wanted) {
+          playingSourceRef.current = null;
+          setPlayingSource(null);
+        }
+        onMediaPlaybackMessage(mediaMsg);
       }
-      onMediaPlaybackMessage(mediaMsg);
     },
-    [onMediaPlaybackMessage]
+    [onMediaPlaybackMessage, pauseMusic]
   );
 
   const onMusicMedia = useCallback(
     (mediaMsg: MediaMessage) => {
       if (mediaMsg.playing) {
-        // When YT Music plays, pause YouTube
-        ytWebview.current?.injectJavaScript(`
-          try {
-            var v = document.querySelector('video');
-            if (v && !v.paused) v.pause();
-          } catch (e) {}
-          true;
-        `);
+        playingSourceRef.current = 'ytmusic';
+        setPlayingSource('ytmusic');
         activeWebviewRef.current = musicWebview.current;
+        pauseYt();
+        onMediaPlaybackMessage(mediaMsg);
+      } else {
+        // If YT Music is idle or paused, but YouTube is the one playing in background,
+        // YT Music's idle message must NOT overwrite YouTube's playback state or drop the service!
+        if (playingSourceRef.current === 'youtube') {
+          return;
+        }
+        if (playingSourceRef.current === 'ytmusic' && !mediaMsg.wanted) {
+          playingSourceRef.current = null;
+          setPlayingSource(null);
+        }
+        onMediaPlaybackMessage(mediaMsg);
       }
-      onMediaPlaybackMessage(mediaMsg);
     },
-    [onMediaPlaybackMessage]
+    [onMediaPlaybackMessage, pauseYt]
   );
 
   const stopBoth = useCallback(() => {
-    ytWebview.current?.injectJavaScript(`try { var v = document.querySelector('video'); if (v) v.pause(); } catch(e){}`);
-    musicWebview.current?.injectJavaScript(`try { var v = document.querySelector('video'); if (v) v.pause(); } catch(e){}`);
+    playingSourceRef.current = null;
+    setPlayingSource(null);
+    pauseYt();
+    pauseMusic();
     stopBrowserMedia();
-  }, [stopBrowserMedia]);
+  }, [pauseYt, pauseMusic, stopBrowserMedia]);
+
+  const handleOpenNowPlaying = useCallback(() => {
+    if (playingSourceRef.current === 'ytmusic') {
+      setMode('ytmusic');
+      setScreen('browse');
+      void saveLastMode('ytmusic');
+    } else if (playingSourceRef.current === 'youtube') {
+      setMode('youtube');
+      setScreen('browse');
+      void saveLastMode('youtube');
+    } else {
+      setScreen('browse');
+    }
+  }, []);
 
   // Stop playback when app is locked
   useEffect(() => {
@@ -705,11 +778,11 @@ export function BrowserScreen() {
             },
           ]}
         >
-          {screen !== 'browse' && (
+          {shouldShowNowPlaying && (
             <NowPlayingBar
-              onOpen={() => setScreen('browse')}
+              onOpen={handleOpenNowPlaying}
               page={{
-                onOpen: () => setScreen('browse'),
+                onOpen: handleOpenNowPlaying,
                 onToggle: toggleBrowserMedia,
                 onStop: stopBoth,
               }}

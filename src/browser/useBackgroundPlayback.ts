@@ -246,8 +246,8 @@ export function useBackgroundPlayback(
           : message.hasMedia && message.id
             ? {
                 id: message.id,
-                title: message.title || 'YouTube',
-                artist: message.artist || null,
+                title: message.title || (message.music ? 'YouTube Music' : 'YouTube'),
+                artist: message.artist || (message.music ? 'YouTube Music' : null),
                 playing: message.playing,
                 at: message.at,
                 length: message.length,
