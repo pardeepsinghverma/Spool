@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { useTheme } from '../ui/ThemeContext';
 import { TrialChip } from '../ui/TrialChip';
@@ -119,29 +119,22 @@ export function ProfileScreen({
           <TrialChip />
         </View>
 
-        <Text style={[styles.section, { color: t.onDim }]}>Subscription</Text>
+        <Text style={[styles.section, { color: t.onDim }]}>About Spool</Text>
 
         <SettingRow
-          label={email ? 'Account' : 'Sign in'}
-          value={email ?? 'Use it on every phone'}
-          onPress={() => setAccountIntent({})}
+          label="Edition"
+          value="Open Source (GPL-3.0)"
+          valueColour={fixed.saved}
+          onPress={() => setPaywallOpen(true)}
         />
         <SettingRow
-          label={
-            lic.entitled
-              ? (lic.plan === 'annual' ? 'Yearly plan' : (lic.plan === 'daily' ? '1-Day plan' : 'Monthly plan'))
-              : 'Subscribe'
-          }
-          value={
-            lic.entitled
-              ? licenceDays === null
-                ? 'Active'
-                : `${licenceDays} ${licenceDays === 1 ? 'day' : 'days'} left`
-              : lic.paidThrough && lic.paidThrough > Date.now()
-                ? `Paid to ${formatDate(lic.paidThrough)}`
-                : `${PRICES.annual?.amount || '₹249'} a year`
-          }
-          valueColour={lic.entitled ? fixed.saved : undefined}
+          label="Source Code"
+          value="GitHub · pardeepsinghverma/Spool"
+          onPress={() => Linking.openURL('https://github.com/pardeepsinghverma/Spool').catch(() => {})}
+        />
+        <SettingRow
+          label="Community & Support"
+          value="Issues, Feedback & Details"
           onPress={() => setPaywallOpen(true)}
         />
 

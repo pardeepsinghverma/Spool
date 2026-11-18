@@ -39,7 +39,7 @@ object TrialGuard {
    */
   private const val CLOCK_SLACK_MS = 26L * 60 * 60 * 1000
 
-  val enabled: Boolean get() = BuildConfig.TRIAL
+  val enabled: Boolean get() = false
   val trialDays: Long get() = runCatching { BuildConfig.TRIAL_DAYS }.getOrDefault(7L)
   val maxDownloads: Int get() = BuildConfig.TRIAL_MAX_DOWNLOADS
   val maxSeconds: Int get() = BuildConfig.TRIAL_MAX_SECONDS
@@ -141,68 +141,29 @@ object TrialGuard {
    * True once the trial is over — by the calendar, or because the clock went
    * backwards far enough that someone was clearly trying.
    */
-  fun expired(context: Context): Boolean {
-    if (!enabled) return false
-    val now = System.currentTimeMillis()
-    if (now >= expiresAt(context)) return true
-    // Before the build existed is not a date this build can be running on.
-    if (now < BuildConfig.BUILT_AT - CLOCK_SLACK_MS) return true
-    return now < highWater(context) - CLOCK_SLACK_MS
-  }
+  fun expired(context: Context): Boolean = false
 
   /**
-   * Whether this APK is still the one that was signed.
-   *
-   * Repackaging is how a patched build gets back onto a device — apktool, edit,
-   * resign with a throwaway key — and it always changes the certificate. An
-   * empty pin means an unsigned-for-release build (the debug variant), where
-   * this has nothing to compare against and must not refuse.
+   * Whether this APK is still the one that was signed. Open source builds allow any signing certificate.
    */
-  fun intact(context: Context): Boolean {
-    val pinned = BuildConfig.SIGNING_SHA256
-    if (pinned.isBlank()) return true
-    return runCatching { certificateHash(context) == pinned }.getOrDefault(false)
-  }
+  fun intact(context: Context): Boolean = true
 
-  private fun certificateHash(context: Context): String {
-    val pm = context.packageManager
-    val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-      val info = pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
-      info.signingInfo?.apkContentsSigners
-    } else {
-      @Suppress("DEPRECATION")
-      pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNATURES).signatures
-    } ?: return ""
-
-    val first = signatures.firstOrNull() ?: return ""
-    return MessageDigest.getInstance("SHA-256")
-      .digest(first.toByteArray())
-      .joinToString("") { "%02X".format(it) }
-  }
+  private fun certificateHash(context: Context): String = ""
 
   /**
    * The one reason a download must not start, or null when it may.
-   *
-   * `seconds` is what the extractor said the video runs to; 0 means it did not
-   * say, and an unknown length is not grounds for refusing.
+   * Open source builds allow unlimited downloads of any duration.
    */
-  fun refuse(context: Context, seconds: Int): String? {
-    if (!enabled) return null
-    if (!intact(context)) return REASON_TAMPERED
-    if (expired(context)) return REASON_EXPIRED
-    if (remaining(context) <= 0) return REASON_QUOTA
-    if (seconds > maxSeconds) return REASON_TOO_LONG
-    return null
-  }
+  fun refuse(context: Context, seconds: Int): String? = null
 
   /** Everything the app's own screens need to describe the trial. */
   fun status(context: Context): Map<String, Any?> = mapOf(
-    "trial" to enabled,
-    "expiresAt" to expiresAt(context).toDouble(),
-    "expired" to expired(context),
-    "intact" to intact(context),
-    "used" to used(context),
-    "maxDownloads" to maxDownloads,
-    "maxSeconds" to maxSeconds,
+    "trial" to false,
+    "expiresAt" to Double.POSITIVE_INFINITY,
+    "expired" to false,
+    "intact" to true,
+    "used" to 0,
+    "maxDownloads" to 999999,
+    "maxSeconds" to 999999,
   )
 }

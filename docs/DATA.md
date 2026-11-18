@@ -28,6 +28,9 @@ Three things to hold on to before reading anything else:
 
 ---
 
+> [!NOTE]
+> **Open Source Transition**: In Spool v2 Open Source Edition, `LicenseGuard.entitled` is permanently `true` and `TrialGuard.enabled` is `false`. All trial limitations, download quotas, duration caps, and subscription checks are bypassed. The app is fully unlocked for all users.
+
 ## 1. The stores, at a glance
 
 | Where | What | Lifetime |

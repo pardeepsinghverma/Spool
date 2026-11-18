@@ -1177,6 +1177,9 @@ embedded cover is the better of the two.
 
 ## 12. Pre-release / trial
 
+> [!NOTE]
+> **Open Source Edition**: In Spool v2 Open Source Edition, `TrialGuard.enabled` is `false` and `TrialGuard.refuse` always returns `null`. The trial limits, expiration dates, and save quotas are retired. The app is fully unlocked.
+
 **Where:** `TrialGuard.kt` (decides), `core/trial.ts` (describes),
 `ui/TrialChip.tsx`, `sheets/PreReleaseSheet.tsx`
 
@@ -1464,6 +1467,9 @@ beyond what the user was doing. §14 still holds.
 ---
 
 ## 17. Subscriptions
+
+> [!NOTE]
+> **Open Source Edition**: In Spool v2 Open Source Edition, `LicenseGuard.entitled` is permanently `true`. Background playback, unlimited downloads, and all features are free and unrestricted. Forced paywalls and verification checks are removed.
 
 **Where:** `LicenseGuard.kt` (decides), `core/license.ts` (describes),
 `core/account.ts` (the account and the one request helper), `core/payments.ts`

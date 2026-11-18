@@ -143,7 +143,7 @@ export const BACKGROUND_SCRIPT = `
         // by then the pause has already been mistaken for the user's own.
         background = reallyHidden() || name === 'pagehide' || name === 'freeze';
         e.stopImmediatePropagation();
-        if (background) resume();
+        if (background) resume(true);
       }, true);
     }
   );
@@ -239,12 +239,6 @@ export const BACKGROUND_SCRIPT = `
       wanted = false;
       failures = 0;
     } else {
-      // A pause arriving on the heels of our own resume *is* that resume
-      // failing — the play was allowed, sound came out for a moment, and
-      // whatever paused it the first time paused it again. Counting it is the
-      // only way the watchdog can tell "the system twitched once" from "this
-      // page cannot be made to play right now", and the second one has to end
-      // in giving up rather than in trying harder.
       if (Date.now() - resumedAt < RESUME_GAP_MS * 2) failures++;
       // Undo it here rather than waiting for the interval: background timers
       // are throttled hard, and a second of silence is a second too many.

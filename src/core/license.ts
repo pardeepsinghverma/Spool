@@ -106,9 +106,17 @@ export type LicenceView = LicenceStatus & {
 
 type Facts = { paidThrough: number; plan: string };
 
-let cached: LicenceStatus = NONE;
+const OPEN_SOURCE_STATUS: LicenceStatus = {
+  entitled: true,
+  expiresAt: Number.MAX_SAFE_INTEGER,
+  plan: 'open-source',
+  device: '',
+  server: '',
+};
+
+let cached: LicenceStatus = OPEN_SOURCE_STATUS;
 let facts: Facts = { paidThrough: 0, plan: '' };
-let view: LicenceView = { ...NONE, paidThrough: 0 };
+let view: LicenceView = { ...OPEN_SOURCE_STATUS, paidThrough: 0 };
 let nextSyncAt = 0;
 const listeners = new Set<() => void>();
 
@@ -130,9 +138,7 @@ export function refreshLicence(): LicenceStatus {
   try {
     cached = YtDlp.licenceStatus();
   } catch {
-    // A build without the function is a build without subscriptions, not a
-    // broken one — exactly the reading `trial.ts` takes of a missing trial.
-    cached = NONE;
+    cached = OPEN_SOURCE_STATUS;
   }
   rebuild();
   return cached;

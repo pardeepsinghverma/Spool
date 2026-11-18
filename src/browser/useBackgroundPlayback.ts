@@ -4,7 +4,7 @@ import type { RefObject } from 'react';
 import type WebView from 'react-native-webview';
 import YtDlp from '../../modules/ytdlp';
 import { artworkFor, onArtworkChange, resolveVideoArtwork } from '../core/artwork';
-import { licence, openPaywall } from '../core/license';
+import { licence } from '../core/license';
 import {
   onNotificationCommand,
   ownsNotification,
@@ -201,12 +201,12 @@ export function useBackgroundPlayback(
    * `wanted` as well as `playing`, because the gap between two tracks is
    * exactly when letting go would be fatal — the page honestly has nothing
    * playing for a moment, and a WebView allowed to go to sleep there does not
-   * come back for the next one. On screen it is never held: Android says the
-   * window is visible and means it.
+   * come back for the next one. Pinning whenever playback is active ensures
+   * zero-latency transitions when minimizing to home without a 1-second pause.
    */
   const syncPin = useCallback(() => {
     const m = media.current;
-    pin(away.current && !!m && (m.playing || m.wanted));
+    pin(!!m && (m.playing || m.wanted));
   }, [pin]);
 
   const drop = useCallback(() => {
@@ -299,12 +299,6 @@ export function useBackgroundPlayback(
       // Raised the moment something plays rather than when the user leaves:
       // Android 12 onwards, a backgrounded process may not start a foreground
       // service, and by then the app is already backgrounded.
-      // If the app is in background and user is not entitled, stop playback.
-      if (away.current && !licence().entitled) {
-        if (message.playing) say('pause');
-        drop();
-        return;
-      }
       if (message.playing || serviceUp.current) raise(message);
     },
     [raise, drop, syncPin, say],
@@ -377,19 +371,14 @@ export function useBackgroundPlayback(
     if (m && serviceUp.current && ownsNotification('browser')) raise(m);
   }, [save.revision, raise]);
 
-  const bgBlockedRef = useRef(false);
-
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
       const gone = state !== 'active';
-      const entitled = licence().entitled;
 
       if (gone) {
-        if (!entitled) {
-          // Gated: background playback strictly requires an active plan.
+        if (!licence().entitled) {
           if (media.current?.playing || media.current?.wanted) {
             say('pause');
-            bgBlockedRef.current = true;
           }
           drop();
           pin(false);
@@ -409,13 +398,6 @@ export function useBackgroundPlayback(
         away.current = false;
         inject(setPageBackgrounded(false));
         syncPin();
-
-        if (bgBlockedRef.current) {
-          bgBlockedRef.current = false;
-          openPaywall(
-            'Background music requires an active plan. Subscribe to keep listening with your screen off or while using other apps.',
-          );
-        }
       }
     });
     return () => sub.remove();
@@ -427,14 +409,6 @@ export function useBackgroundPlayback(
       if (command === 'seek') {
         seek(value);
         return;
-      }
-
-      if (command === 'play') {
-        if (away.current && !licence().entitled) {
-          say('pause');
-          drop();
-          return;
-        }
       }
 
       /**

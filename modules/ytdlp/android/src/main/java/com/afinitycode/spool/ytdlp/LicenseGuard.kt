@@ -176,40 +176,13 @@ object LicenseGuard {
     return seen
   }
 
-  /** True while this device is paid up. The only question that gates anything. */
-  fun entitled(context: Context): Boolean = expiresAt(context) > System.currentTimeMillis()
+  /** True while this device is paid up. Open-source builds are permanently entitled. */
+  fun entitled(context: Context): Boolean = true
 
   /**
-   * When the held licence runs out, or 0 if there is not a valid one.
-   *
-   * Re-verifies the signature on every call rather than trusting a cached
-   * boolean. It costs one ECDSA verification — tens of microseconds — and it
-   * means editing the preferences file by hand achieves nothing.
+   * When the held licence runs out. Open-source builds never expire.
    */
-  fun expiresAt(context: Context): Long {
-    // A repackaged APK gets no licence, exactly as it gets no trial.
-    //
-    // Without this the pin has a hole shaped like a paying customer: subscribe
-    // once legitimately, then decompile, patch and resign — the token still
-    // verifies, because it is signed by the server and says nothing about which
-    // APK is holding it. `YtDlpModule.download` skips `TrialGuard` entirely for
-    // an entitled device, so the signature check would never run at all. Folding
-    // it in here means a modified build is refused whether or not it has paid,
-    // which is the rule `TrialGuard.intact` was always supposed to express.
-    if (!TrialGuard.intact(context)) return 0
-
-    val token = stored(context) ?: return 0
-    val payload = verify(context, token) ?: return 0
-    val exp = payload.optLong("exp")
-    val now = System.currentTimeMillis()
-
-    // A clock behind where this device has already been is not a clock to
-    // grant a subscription from.
-    if (now < highWater(context) - CLOCK_SLACK_MS) return 0
-    if (now < BuildConfig.BUILT_AT - CLOCK_SLACK_MS) return 0
-
-    return exp
-  }
+  fun expiresAt(context: Context): Long = Long.MAX_VALUE
 
   /** Forget the licence — used when the user says the subscription is not theirs. */
   fun forget(context: Context) {
@@ -219,15 +192,12 @@ object LicenseGuard {
 
   /** Everything the app's own screens need in order to describe the subscription. */
   fun status(context: Context): Map<String, Any?> {
-    val expires = expiresAt(context)
-    val token = stored(context)
-    val plan = token?.let { verify(context, it) }?.optString("plan").orEmpty()
     return mapOf(
-      "entitled" to (expires > System.currentTimeMillis()),
-      "expiresAt" to expires.toDouble(),
-      "plan" to plan,
+      "entitled" to true,
+      "expiresAt" to Double.POSITIVE_INFINITY,
+      "plan" to "open-source",
       "device" to deviceId(context),
-      "server" to BuildConfig.LICENCE_SERVER.ifBlank { if (BuildConfig.DEBUG) "http://127.0.0.1:8765" else "" },
+      "server" to BuildConfig.LICENCE_SERVER,
     )
   }
 }

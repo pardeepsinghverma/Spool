@@ -1,19 +1,12 @@
 # Spool
 
-**A local music and video library for Android, with a YouTube browser attached
-to fill it.**
+**A free and open-source dual-engine YouTube and YouTube Music player with true background playback, ad-blocking, and offline downloads for Android.**
 
-Spool is a WebView pointed at YouTube, a bundled yt-dlp behind it, and a player
-that keeps going with the screen off. The library is the product; downloading is
-how things get into it. There are no analytics and no account is needed —
-everything the app knows lives on the device. Subscriptions add one server and
-an optional Spool account (email and password) so that what you pay for follows
-you to another phone; paying is a UPI transfer proved with a screenshot.
+Spool features dedicated, persistent WebViews for both YouTube and YouTube Music with seamless switching, built-in ad blocking, uninterrupted background and screen-off audio playback with lock screen media controls, and embedded `yt-dlp` + `ffmpeg` for high quality offline downloads.
 
-The design constraint that shapes the browser half: **the app draws exactly one
-control over the page.** Every incumbent in this category — Vidmate, Snaptube,
-TubeMate — puts a floating bubble over your video. Spool has a single floating
-action button on the Browse tab and nothing else.
+Spool is 100% Free and Open Source Software (FOSS) licensed under the GNU General Public License v3.0 (GPL-3.0). There are no paywalls, no forced subscriptions, no ads, no trackers, and no telemetry — your data stays strictly on your device.
+
+The design constraint that shapes the browser half: **the app draws minimal, respectful chrome over the page.** Spool keeps the navigation clean, with a slide-down bottom bar, a mode switcher between YouTube and YouTube Music, and background media controls.
 
 > **Android only, and sideloaded.** Spool is not on the Play Store and cannot be
 > — see [Status](#status) and [Distribution](#distribution).
@@ -607,13 +600,9 @@ device when the user exports it.
 
 ## Status
 
-This is a **sideloaded pre-release APK with a trial guard** — seven days, twenty
-saves, a three-minute per-video cap by default, all stamped into `BuildConfig` at
-build time. The guard is enforced in Kotlin and only *described* in TypeScript:
-R8 obfuscates the native side and a signature pin refuses a repackaged APK,
-neither of which touches the JavaScript bundle. None of it makes the build
-uncrackable and the code says so; the goal is to move the cost from "clear app
-data" to "decompile, patch, resign, defeat the pin".
+Spool is **Free and Open Source Software (FOSS)**. All features — seamless switching between YouTube and YouTube Music, ad-blocking, background playback, and offline downloads — are unrestricted and permanently free.
+
+The project is built on React Native (Expo SDK 52 / New Architecture) with custom Kotlin native modules for media session management (`PlaybackService.kt`) and `yt-dlp` integration.
 
 **Android only.** The `DownloadEngine`, `Muxer` and `TokenProvider` interfaces in
 [`src/core/engine.ts`](src/core/engine.ts) exist as porting seams so an iOS
@@ -672,10 +661,9 @@ This is not legal advice.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Pardeep Verma.
+GNU General Public License v3.0 (GPL-3.0) — see [LICENSE](LICENSE).
+Copyright (c) 2026 Pardeep Verma.
 
 Spool bundles [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense) and
 [ffmpeg](https://ffmpeg.org/) via
 [youtubedl-android](https://github.com/JunkFood02/youtubedl-android) (GPL-3.0).
-**If you redistribute builds, ffmpeg's licensing terms travel with the binary** —
-the APK as a whole is subject to GPL-3.0, even though this source tree is MIT.

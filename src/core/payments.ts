@@ -63,10 +63,10 @@ let cachedPlans: LivePlan[] = [
 ];
 
 let cachedSettings: LivePaymentSettings = {
-  vpa: 'vermapardeep.official@okaxis',
-  payee: 'PARDEEP VERMA',
-  qrImageUrl: '/paymentqrcode.jpeg',
-  whatsapp: '919464263538',
+  vpa: '',
+  payee: 'Spool Support',
+  qrImageUrl: '',
+  whatsapp: '910000000000',
 };
 
 /**
@@ -143,7 +143,7 @@ export function useLivePlans() {
  * one place; the server's answer to `/v1/pay/start` and `/v1/pay/claim`
  * replaces it for the rest of the process.
  */
-export const SUPPORT_WHATSAPP = '919464263538';
+export const SUPPORT_WHATSAPP = '910000000000';
 let support = SUPPORT_WHATSAPP;
 export const supportWhatsapp = () => support;
 

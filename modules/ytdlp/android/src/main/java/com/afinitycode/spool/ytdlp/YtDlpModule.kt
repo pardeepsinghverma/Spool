@@ -106,9 +106,6 @@ class YtDlpModule : Module() {
   /** The repeating "you are still visible", or null when nothing is pinned. */
   private var visibilityPin: Runnable? = null
 
-  /** Found by walking the view tree once; the browser mounts exactly one. */
-  private var browserView = WeakReference<WebView>(null)
-
   @Volatile
   private var initialised = false
 
@@ -144,6 +141,9 @@ class YtDlpModule : Module() {
 
     OnCreate {
       PlaybackCommandBus.register(playbackCommands)
+      runCatching {
+        appContext.currentActivity?.application?.registerActivityLifecycleCallbacks(lifecycleCallbacks)
+      }
     }
 
     AsyncFunction("initialize") { promise: Promise ->
@@ -685,6 +685,9 @@ class YtDlpModule : Module() {
     }
 
     OnDestroy {
+      runCatching {
+        appContext.currentActivity?.application?.unregisterActivityLifecycleCallbacks(lifecycleCallbacks)
+      }
       PlaybackCommandBus.unregister(playbackCommands)
       // A pin outlives React otherwise, and it holds a view from a tree that
       // is being torn down.
@@ -697,6 +700,32 @@ class YtDlpModule : Module() {
       }
       running.clear()
     }
+  }
+
+  private val lifecycleCallbacks = object : android.app.Application.ActivityLifecycleCallbacks {
+    override fun onActivityPaused(activity: android.app.Activity) {
+      if (visibilityPin != null) {
+        main.post {
+          runCatching {
+            allWebViews().forEach { it.dispatchWindowVisibilityChanged(View.VISIBLE) }
+          }
+        }
+      }
+    }
+    override fun onActivityStopped(activity: android.app.Activity) {
+      if (visibilityPin != null) {
+        main.post {
+          runCatching {
+            allWebViews().forEach { it.dispatchWindowVisibilityChanged(View.VISIBLE) }
+          }
+        }
+      }
+    }
+    override fun onActivityResumed(activity: android.app.Activity) {}
+    override fun onActivityStarted(activity: android.app.Activity) {}
+    override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: Bundle?) {}
+    override fun onActivityDestroyed(activity: android.app.Activity) {}
+    override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: Bundle) {}
   }
 
   /**
@@ -712,37 +741,46 @@ class YtDlpModule : Module() {
       visibilityPin = null
 
       if (!pinned) {
-        runCatching { browserView.get()?.let { it.dispatchWindowVisibilityChanged(it.windowVisibility) } }
+        runCatching {
+          allWebViews().forEach { it.dispatchWindowVisibilityChanged(it.windowVisibility) }
+        }
         return@post
+      }
+
+      // Immediately dispatch View.VISIBLE to prevent any pause/stutter on background transition
+      runCatching {
+        allWebViews().forEach { it.dispatchWindowVisibilityChanged(View.VISIBLE) }
       }
 
       val tick = object : Runnable {
         override fun run() {
-          runCatching { browserWebView()?.dispatchWindowVisibilityChanged(View.VISIBLE) }
+          runCatching {
+            allWebViews().forEach { it.dispatchWindowVisibilityChanged(View.VISIBLE) }
+          }
           main.postDelayed(this, VISIBILITY_PIN_MS)
         }
       }
       visibilityPin = tick
-      main.post(tick)
+      main.postDelayed(tick, VISIBILITY_PIN_MS)
     }
   }
 
-  /** The browser's WebView, remembered once found — the tree does not move. */
-  private fun browserWebView(): WebView? {
-    browserView.get()?.let { if (it.isAttachedToWindow) return it }
-    val root = appContext.currentActivity?.window?.decorView ?: return null
-    val found = findWebView(root)
-    browserView = WeakReference(found)
-    return found
+  private fun allWebViews(): List<WebView> {
+    val list = mutableListOf<WebView>()
+    val root = appContext.currentActivity?.window?.decorView ?: return list
+    findAllWebViews(root, list)
+    return list
   }
 
-  private fun findWebView(view: View): WebView? {
-    if (view is WebView) return view
-    if (view !is ViewGroup) return null
+  private fun findAllWebViews(view: View, result: MutableList<WebView>) {
+    if (view is WebView) {
+      result.add(view)
+      return
+    }
+    if (view !is ViewGroup) return
     for (i in 0 until view.childCount) {
-      findWebView(view.getChildAt(i))?.let { return it }
+      findAllWebViews(view.getChildAt(i), result)
     }
-    return null
   }
 
   @Synchronized

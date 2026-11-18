@@ -18,6 +18,9 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.AudioPlaybackConfiguration
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -235,25 +238,43 @@ class PlaybackService : Service() {
 
   private val decoder = Executors.newSingleThreadExecutor()
   private val main = Handler(Looper.getMainLooper())
+  private val mainExecutor = java.util.concurrent.Executor { command -> main.post(command) }
+
+  private var audioManager: AudioManager? = null
+  private var modeListener: Any? = null
+  private var pausedForCall: Boolean = false
+    set(value) {
+      Log.i(TAG, "pausedForCall: $field -> $value (playing=$playing)")
+      field = value
+    }
 
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onCreate() {
     super.onCreate()
     ensureChannel()
+    audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    setupCallInterruptionListener()
     session = MediaSessionCompat(this, "spool").apply {
       setCallback(
         object : MediaSessionCompat.Callback() {
-          override fun onPlay() = command("play")
+          override fun onPlay() {
+            pausedForCall = false
+            command("play")
+          }
 
           /** Assumed to work, for the reason ACTION_PAUSE spells out. */
           override fun onPause() {
+            pausedForCall = false
             playing = false
             publish()
             command("pause")
           }
 
-          override fun onStop() = command("stop")
+          override fun onStop() {
+            pausedForCall = false
+            command("stop")
+          }
           override fun onSkipToNext() = command("next")
           override fun onSkipToPrevious() = command("previous")
 
@@ -277,6 +298,46 @@ class PlaybackService : Service() {
     }
   }
 
+  private fun setupCallInterruptionListener() {
+    val am = audioManager ?: return
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      val listener = AudioManager.OnModeChangedListener { mode ->
+        handleAudioMode(mode)
+      }
+      modeListener = listener
+      runCatching { am.addOnModeChangedListener(mainExecutor, listener) }
+    }
+  }
+
+  private fun handleAudioMode(mode: Int) {
+    val inCall = mode == AudioManager.MODE_RINGTONE ||
+                 mode == AudioManager.MODE_IN_CALL ||
+                 mode == AudioManager.MODE_IN_COMMUNICATION
+    Log.i(TAG, "Audio mode changed: $mode (inCall=$inCall), playing=$playing, pausedForCall=$pausedForCall")
+    if (inCall) {
+      if (playing) {
+        pausedForCall = true
+        playing = false
+        publish()
+        command("pause")
+      }
+    } else if (mode == AudioManager.MODE_NORMAL) {
+      if (pausedForCall) {
+        pausedForCall = false
+        command("play")
+      }
+    }
+  }
+
+  private fun teardownCallInterruptionListener() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      (modeListener as? AudioManager.OnModeChangedListener)?.let {
+        runCatching { audioManager?.removeOnModeChangedListener(it) }
+      }
+    }
+    modeListener = null
+  }
+
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     lastStartId = startId
     when (intent?.action) {
@@ -284,7 +345,11 @@ class PlaybackService : Service() {
         title = intent.getStringExtra(EXTRA_TITLE)?.takeIf { it.isNotBlank() } ?: title
         artist = intent.getStringExtra(EXTRA_ARTIST)
         source = intent.getStringExtra(EXTRA_SOURCE).orEmpty()
-        playing = intent.getBooleanExtra(EXTRA_PLAYING, playing)
+        val nextPlaying = intent.getBooleanExtra(EXTRA_PLAYING, playing)
+        if (nextPlaying) {
+          pausedForCall = false
+        }
+        playing = nextPlaying
         artworkPath = intent.getStringExtra(EXTRA_ARTWORK)
         positionMs = intent.getLongExtra(EXTRA_POSITION, 0)
         durationMs = intent.getLongExtra(EXTRA_DURATION, 0)
@@ -311,9 +376,13 @@ class PlaybackService : Service() {
        * So: assume a pause worked, never assume a play did. A play that does
        * work says so within a tick, from the source itself.
        */
-      ACTION_PLAY -> command("play")
+      ACTION_PLAY -> {
+        pausedForCall = false
+        command("play")
+      }
 
       ACTION_PAUSE -> {
+        pausedForCall = false
         playing = false
         publish()
         command("pause")
@@ -332,11 +401,15 @@ class PlaybackService : Service() {
       ACTION_SAVE -> command("save")
 
       ACTION_DISMISS -> {
+        pausedForCall = false
         command("stop")
         teardown()
       }
 
-      ACTION_STOP -> teardown()
+      ACTION_STOP -> {
+        pausedForCall = false
+        teardown()
+      }
 
       /**
        * Headset and Bluetooth keys arrive as a raw media button intent and are
@@ -379,6 +452,9 @@ class PlaybackService : Service() {
   }
 
   override fun onDestroy() {
+    teardownCallInterruptionListener()
+    audioManager = null
+    pausedForCall = false
     started = false
     shown = false
     releaseWakeLock()
@@ -706,6 +782,7 @@ class PlaybackService : Service() {
 
   private fun teardown() {
     releaseWakeLock()
+    pausedForCall = false
     started = false
     shown = false
     playing = false

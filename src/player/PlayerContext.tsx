@@ -18,8 +18,6 @@ import { saveSession } from '../core/storage';
 import { artworkFor, onArtworkChange } from '../core/artwork';
 import { onNotificationCommand, publishNowPlaying, releaseNowPlaying } from './nowPlaying';
 import { HEARTBEAT_MS, beat, claimPlay, playPermitted, releasePlay } from '../core/playLock';
-import { licence, openPaywall } from '../core/license';
-import { isAppLocked } from '../core/trial';
 
 /**
  * Playback for downloaded media.
@@ -520,11 +518,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * cannot be skipped by a surface that happens to hold the player object.
    */
   const togglePlayback = useCallback(() => {
-    if (isAppLocked()) {
-      openPaywall('Your free trial has ended. Subscribe to an active plan to continue listening.');
-      return;
-    }
-
     const audio = liveAudio.current;
     if (audio) {
       if (audio.playing) {
@@ -578,29 +571,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     publish();
   }, [publish]);
 
-  const localBgBlockedRef = useRef(false);
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (state) => {
-      const gone = state !== 'active';
-      if (gone) {
-        if (!licence().entitled) {
-          const engine = liveAudio.current ?? liveVideo.current;
-          if (engine?.playing) {
-            pauseNow();
-            localBgBlockedRef.current = true;
-          }
-        }
-      } else {
-        if (localBgBlockedRef.current) {
-          localBgBlockedRef.current = false;
-          openPaywall(
-            'Background music requires an active plan. Subscribe to keep listening in the background.',
-          );
-        }
-      }
-    });
-    return () => sub.remove();
-  }, [pauseNow]);
 
   /**
    * The play lock's heartbeat, while anything is loaded. It runs whether or
@@ -938,10 +908,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const engine = liveAudio.current ?? liveVideo.current;
       switch (command) {
         case 'play':
-          if (!licence().entitled && AppState.currentState !== 'active') {
-            pauseNow();
-            return;
-          }
           if (engine && !engine.playing) togglePlayback();
           break;
         case 'pause':

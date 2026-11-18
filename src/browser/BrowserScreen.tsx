@@ -34,7 +34,7 @@ import { NowPlayingBar } from '../player/NowPlayingBar';
 import { ProfileScreen } from '../screens/ProfileScreen';
 import { TabBar, type Tab } from '../shell/TabBar';
 import { PreReleaseSheet } from '../sheets/PreReleaseSheet';
-import { refreshTrial, setPreReleaseOpener, trial, useIsAppLocked } from '../core/trial';
+import { refreshTrial, setPreReleaseOpener, trial } from '../core/trial';
 import {
   licence,
   loadLicenceFacts,
@@ -102,7 +102,6 @@ export function BrowserScreen() {
   const [paywallOpen, setPaywallOpen] = useState(false);
   const [accountIntent, setAccountIntent] = useState<AccountIntent | null>(null);
   const playNotice = usePlayNotice();
-  const appLocked = useIsAppLocked();
 
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -134,7 +133,7 @@ export function BrowserScreen() {
 
   const setBarHidden = useCallback(
     (hidden: boolean) => {
-      if (screen !== 'browse' || appLocked) {
+      if (screen !== 'browse') {
         if (barHiddenRef.current) {
           barHiddenRef.current = false;
           setBarHiddenState(false);
@@ -158,7 +157,7 @@ export function BrowserScreen() {
         useNativeDriver: true,
       }).start();
     },
-    [barAnim, barHeight, screen, appLocked]
+    [barAnim, barHeight, screen]
   );
 
   // Keep active webview ref pointing to currently playing webview, or current mode if idle
@@ -280,13 +279,6 @@ export function BrowserScreen() {
       setScreen('browse');
     }
   }, []);
-
-  // Stop playback when app is locked
-  useEffect(() => {
-    if (appLocked) {
-      stopBoth();
-    }
-  }, [appLocked, stopBoth]);
 
   // Sheet openers
   useEffect(() => {
@@ -769,7 +761,7 @@ export function BrowserScreen() {
       </View>
 
       {/* Slide-down Bottom Bar with NowPlayingBar & Mode Switcher */}
-      {!isFullscreen && !appLocked && (
+      {!isFullscreen && (
         <Animated.View
           style={[
             styles.bottomBarContainer,
@@ -797,7 +789,7 @@ export function BrowserScreen() {
       )}
 
       {/* Tap receiver when bottom bar is hidden to quickly reveal it */}
-      {barHidden && !isFullscreen && !appLocked && screen === 'browse' && (
+      {barHidden && !isFullscreen && screen === 'browse' && (
         <Pressable
           style={styles.showBarTouchZone}
           onPress={() => setBarHidden(false)}
@@ -806,75 +798,7 @@ export function BrowserScreen() {
         />
       )}
 
-      {/* Locked overlay until subscription is active */}
-      {appLocked && (
-        <View
-          style={[
-            StyleSheet.absoluteFill,
-            {
-              backgroundColor: t.chrome,
-              zIndex: 998,
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: 24,
-            },
-          ]}
-        >
-          <MaterialIcons name="lock" size={54} color={fixed.warn} style={{ marginBottom: 16 }} />
-          <Text
-            style={{
-              color: t.on,
-              fontSize: 22,
-              fontWeight: '700',
-              textAlign: 'center',
-              marginBottom: 8,
-            }}
-          >
-            Subscription Required
-          </Text>
-          <Text
-            style={{
-              color: t.onDim,
-              fontSize: 14,
-              textAlign: 'center',
-              lineHeight: 22,
-              marginBottom: 28,
-              maxWidth: 320,
-            }}
-          >
-            An active subscription is required to use Spool. Subscribe now to enjoy unlimited, ad-free YouTube and YouTube Music with background playback.
-          </Text>
-          <Pressable
-            onPress={() => setPaywallOpen(true)}
-            style={{
-              backgroundColor: t.accent,
-              paddingHorizontal: 28,
-              paddingVertical: 14,
-              borderRadius: 24,
-              marginBottom: 14,
-              minWidth: 220,
-              alignItems: 'center',
-            }}
-          >
-            <Text style={{ color: t.onAccent, fontWeight: '700', fontSize: 16 }}>
-              View Plans & Subscribe
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={() => setAccountIntent({})}
-            style={{
-              paddingHorizontal: 20,
-              paddingVertical: 10,
-            }}
-          >
-            <Text style={{ color: t.onDim, fontWeight: '600', fontSize: 14 }}>
-              Already subscribed? Sign In
-            </Text>
-          </Pressable>
-        </View>
-      )}
-
-      {preRelease && !appLocked && <PreReleaseSheet onClose={() => setPreRelease(false)} />}
+      {preRelease && <PreReleaseSheet onClose={() => setPreRelease(false)} />}
       {playNotice && <PlayLockSheet notice={playNotice} />}
       {paywallOpen && (
         <SubscribeSheet
